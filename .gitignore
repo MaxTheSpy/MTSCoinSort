@@ -3,3 +3,33 @@
 /coin_sort_sessions
 /gui_mts_coinsort_v0.0.18.py
 /Numista CSV
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# CoinSort runtime data
+coin_sort_exports/
+coin_sort_sessions/
+Numista CSV/
+
+# Future app data (if you keep local test data)
+settings.json

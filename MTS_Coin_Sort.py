@@ -1,4 +1,4 @@
-# MTS CoinSort V0.0.18
+# MTS CoinSort V0.0.19
 # uses prompt_toolkit
 # pip install prompt_toolkit or pip install prompt_toolkit colorama
 
@@ -11,6 +11,7 @@ import select
 import shutil
 import builtins
 import io
+import ctypes
 from datetime import datetime
 from collections import Counter
 
@@ -37,11 +38,47 @@ MINTS = ["P", "D", "S", "W", "No Mint"]
 DENOMS = []  # Built from Numista CSV exports at startup.
 SESSION_TYPES = ["Bulk sorting", "Coin roll hunt", "Collection sorting", "Inventory audit", "Other"]
 
-BASE_DIR = os.getcwd()
-SESSIONS_DIR = os.path.join(BASE_DIR, "coin_sort_sessions")
-NUMISTA_DIR = os.path.join(BASE_DIR, "Numista CSV")
-EXPORTS_DIR = os.path.join(BASE_DIR, "coin_sort_exports")
-SETTINGS_PATH = os.path.join(BASE_DIR, "coin_sorter_settings.json")
+APP_NAME = "MTS CoinSort"
+APP_SLUG = "mts-coinsort"
+
+
+def default_config_dir():
+    """Return the OS-standard folder where settings.json should live.
+
+    Keep settings outside the movable data folder so the app can always find
+    the user's chosen data_dir on startup.
+    """
+    if os.name == "nt":
+        root = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Roaming")
+        return os.path.join(root, APP_NAME)
+    if sys.platform == "darwin":
+        return os.path.join(os.path.expanduser("~"), "Library", "Application Support", APP_NAME)
+    root = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(root, APP_SLUG)
+
+
+def default_data_dir():
+    """Return the OS-standard folder where sessions/exports/Numista CSV live."""
+    if os.name == "nt":
+        root = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Roaming")
+        return os.path.join(root, APP_NAME)
+    if sys.platform == "darwin":
+        return os.path.join(os.path.expanduser("~"), "Library", "Application Support", APP_NAME)
+    root = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return os.path.join(root, APP_SLUG)
+
+
+def clean_user_path(path):
+    """Expand ~ and environment variables from settings.json path values."""
+    return os.path.abspath(os.path.expandvars(os.path.expanduser(str(path).strip())))
+
+
+CONFIG_DIR = default_config_dir()
+SETTINGS_PATH = os.path.join(CONFIG_DIR, "settings.json")
+DATA_DIR = default_data_dir()
+SESSIONS_DIR = os.path.join(DATA_DIR, "coin_sort_sessions")
+NUMISTA_DIR = os.path.join(DATA_DIR, "Numista CSV")
+EXPORTS_DIR = os.path.join(DATA_DIR, "coin_sort_exports")
 
 DEFAULT_HOTKEYS = {
     "reject": "/",
@@ -98,12 +135,61 @@ KEY_SHIFT_TAB = "SHIFT_TAB"
 FOCUS_ORDER = ["year", "mint", "save", "notes", "recent", "change_denom", "statistics", "invalid_check", "quit"]
 
 # ANSI color/bold works in most Linux terminals.
+# On Windows, we attempt to enable Virtual Terminal Processing. If that is not
+# available, the app falls back to plain text plus cls-based screen clears.
 USE_COLOR = True
 BIG_UI = True
+ANSI_SUPPORTED = os.name != "nt"
+
+
+def enable_ansi_on_windows():
+    """Enable ANSI escape handling in modern Windows terminals when possible.
+
+    Returns True when ANSI control sequences should be safe to use.
+    Linux/macOS terminals normally support ANSI already.
+    """
+    if os.name != "nt":
+        return True
+
+    # This no-op shell call helps some Windows terminal hosts initialize ANSI.
+    try:
+        os.system("")
+    except Exception:
+        pass
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        if handle in (0, -1):
+            return False
+
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        new_mode = mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        if not kernel32.SetConsoleMode(handle, new_mode):
+            return False
+
+        return True
+    except Exception:
+        return False
+
+
+def configure_terminal_output():
+    """Set global terminal capabilities after startup/settings load."""
+    global ANSI_SUPPORTED, USE_COLOR
+    ANSI_SUPPORTED = enable_ansi_on_windows()
+
+    # If ANSI is not supported, disable colors too, because the color helpers
+    # are also ANSI escape sequences.
+    if not ANSI_SUPPORTED:
+        USE_COLOR = False
 
 
 def c(text, code):
-    if not USE_COLOR:
+    if not USE_COLOR or not ANSI_SUPPORTED:
         return text
     return f"\033[{code}m{text}\033[0m"
 
@@ -136,38 +222,39 @@ def reverse(text):
     return c(text, "7")
 
 
-def enable_ansi_on_windows():
-    """Enable ANSI escape handling in modern Windows terminals when possible."""
-    if os.name == "nt":
-        # This no-op shell call enables Virtual Terminal processing in many
-        # Windows terminal hosts without adding dependencies.
-        os.system("")
-
-
 _SCREEN_BUFFER = None
 
 
 def _flush_screen_buffer():
     """Write a full screen redraw in one terminal update.
 
-    This reduces flicker compared with printing line-by-line after every key.
-    It is still the same app/UI, just buffered so Windows Terminal and Linux
-    terminals get one repaint instead of dozens of tiny writes.
+    Linux/macOS use ANSI cursor/screen controls for smooth redraws. Windows
+    uses ANSI when available, otherwise it falls back to `cls` so PyInstaller
+    console builds do not print raw escape codes like ``←[2J``.
     """
     global _SCREEN_BUFFER
     if _SCREEN_BUFFER is None:
         return
+
     content = _SCREEN_BUFFER.getvalue()
     _SCREEN_BUFFER = None
-    # Move to the top and clear the whole screen before writing the
-    # buffered page. This prevents shorter popups, like the New Collection
-    # warning, from leaving pieces of the previous main screen behind.
-    # Because the whole page is still written in one buffered update, this
-    # stays much smoother than line-by-line clear/print redraws.
-    sys.stdout.write("\033[?25l\033[H\033[2J")
-    sys.stdout.write(content)
-    sys.stdout.write("\033[?25h")
-    sys.stdout.flush()
+
+    # In --windowed PyInstaller builds sys.stdout can be None. The app should
+    # be built with --console, but this guard prevents a crash if it is not.
+    if sys.stdout is None:
+        return
+
+    if ANSI_SUPPORTED:
+        sys.stdout.write("\033[?25l\033[H\033[2J")
+        sys.stdout.write(content)
+        sys.stdout.write("\033[?25h")
+        sys.stdout.flush()
+    else:
+        # Plain Windows console fallback. This may flicker a little more than
+        # ANSI redraws, but it stays readable and works in cmd/PowerShell/exe.
+        os.system("cls" if os.name == "nt" else "clear")
+        sys.stdout.write(content)
+        sys.stdout.flush()
 
 
 def print(*args, sep=" ", end="\n", file=None, flush=False):
@@ -215,26 +302,54 @@ def hotkey_matches(key, action):
     return normalize_key_for_compare(key) == normalize_key_for_compare(HOTKEYS.get(action, DEFAULT_HOTKEYS[action]))
 
 
+def apply_data_dir(path):
+    """Update all user-data folders after loading a custom data_dir."""
+    global DATA_DIR, SESSIONS_DIR, NUMISTA_DIR, EXPORTS_DIR
+    DATA_DIR = clean_user_path(path)
+    SESSIONS_DIR = os.path.join(DATA_DIR, "coin_sort_sessions")
+    NUMISTA_DIR = os.path.join(DATA_DIR, "Numista CSV")
+    EXPORTS_DIR = os.path.join(DATA_DIR, "coin_sort_exports")
+
+
+def ensure_app_dirs():
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(SESSIONS_DIR, exist_ok=True)
+    os.makedirs(NUMISTA_DIR, exist_ok=True)
+    os.makedirs(EXPORTS_DIR, exist_ok=True)
+
+
 def load_settings():
     global HOTKEYS, USE_COLOR, BIG_UI
     HOTKEYS = DEFAULT_HOTKEYS.copy()
     if not os.path.exists(SETTINGS_PATH):
+        ensure_app_dirs()
+        save_settings()
         return
     try:
         with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
+
+        custom_data_dir = data.get("data_dir", "")
+        if isinstance(custom_data_dir, str) and custom_data_dir.strip():
+            apply_data_dir(custom_data_dir)
+
         saved_hotkeys = data.get("hotkeys", {})
         for action in DEFAULT_HOTKEYS:
             if action in saved_hotkeys and isinstance(saved_hotkeys[action], str) and saved_hotkeys[action]:
                 HOTKEYS[action] = saved_hotkeys[action]
         USE_COLOR = bool(data.get("use_color", USE_COLOR))
         BIG_UI = bool(data.get("big_ui", BIG_UI))
+        ensure_app_dirs()
     except Exception:
         HOTKEYS = DEFAULT_HOTKEYS.copy()
+        ensure_app_dirs()
 
 
 def save_settings():
+    ensure_app_dirs()
     data = {
+        "data_dir": DATA_DIR,
         "hotkeys": HOTKEYS,
         "use_color": USE_COLOR,
         "big_ui": BIG_UI,
@@ -272,6 +387,8 @@ def settings_menu():
         print()
         print(bold("Select a hotkey option, press ENTER, then press the key you want to assign."))
         print(dim(f"Settings file: {SETTINGS_PATH}"))
+        print(dim(f"Data folder  : {DATA_DIR}"))
+        print(dim("To move sessions/exports/Numista CSV, edit data_dir in settings.json, then restart."))
         print()
 
         for i, item in enumerate(menu_items):
@@ -536,15 +653,15 @@ def safe_filename(name):
 
 
 def ensure_sessions_dir():
-    os.makedirs(SESSIONS_DIR, exist_ok=True)
+    ensure_app_dirs()
 
 
 def ensure_numista_dir():
-    os.makedirs(NUMISTA_DIR, exist_ok=True)
+    ensure_app_dirs()
 
 
 def ensure_exports_dir():
-    os.makedirs(EXPORTS_DIR, exist_ok=True)
+    ensure_app_dirs()
 
 
 def normalize_decimal(value):
@@ -2455,6 +2572,7 @@ def sorting_loop(session):
 
 def main():
     load_settings()
+    configure_terminal_output()
     while True:
         session = session_menu()
         if not session:
