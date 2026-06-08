@@ -83,9 +83,12 @@ jobs:
             'Type=Application' \
             'Name=MTS CoinSort' \
             'Exec=MTS-CoinSort' \
+            'Icon=mts-coinsort' \
             'Terminal=true' \
             'Categories=Utility;' \
             > AppDir/MTS-CoinSort.desktop
+
+          printf '<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"><rect width="256" height="256" rx="40" fill="#2f5d50"/><circle cx="128" cy="128" r="74" fill="#d6b56d"/><text x="128" y="145" font-size="54" text-anchor="middle" font-family="serif" fill="#2f5d50">MTS</text></svg>' > AppDir/mts-coinsort.svg
 
       - name: Build AppImage
         run: |
