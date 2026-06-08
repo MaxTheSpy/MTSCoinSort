@@ -76,17 +76,15 @@ jobs:
       - name: Create AppDir
         run: |
           mkdir -p AppDir/usr/bin
-
           cp dist/MTS-CoinSort AppDir/usr/bin/MTS-CoinSort
-
-          cat > AppDir/MTS-CoinSort.desktop <<EOF
-[Desktop Entry]
-Type=Application
-Name=MTS CoinSort
-Exec=MTS-CoinSort
-Terminal=true
-Categories=Utility;
-EOF
+          printf '%s\n' \
+            '[Desktop Entry]' \
+            'Type=Application' \
+            'Name=MTS CoinSort' \
+            'Exec=MTS-CoinSort' \
+            'Terminal=true' \
+            'Categories=Utility;' \
+            > AppDir/MTS-CoinSort.desktop
 
       - name: Build AppImage
         run: |
@@ -95,7 +93,7 @@ EOF
 
           chmod +x appimagetool
 
-          ARCH=x86_64 ./appimagetool AppDir MTS-CoinSort-x86_64.AppImage
+          ARCH=x86_64 ./appimagetool --no-appstream AppDir MTS-CoinSort-x86_64.AppImage
 
       - name: Upload AppImage to Release
         uses: softprops/action-gh-release@v2
