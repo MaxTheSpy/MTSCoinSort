@@ -44,7 +44,7 @@ jobs:
           files: dist/MTS-CoinSort.exe
 
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v4
@@ -56,7 +56,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget
+          sudo apt-get install -y wget libfuse2
 
           python -m pip install --upgrade pip
           pip install pyinstaller
@@ -77,6 +77,7 @@ jobs:
         run: |
           mkdir -p AppDir/usr/bin
           cp dist/MTS-CoinSort AppDir/usr/bin/MTS-CoinSort
+
           printf '%s\n' \
             '[Desktop Entry]' \
             'Type=Application' \
