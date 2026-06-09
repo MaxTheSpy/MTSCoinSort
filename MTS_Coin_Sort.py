@@ -1,4 +1,4 @@
-# MTS CoinSort V0.1.0
+# MTS CoinSort V0.1.2
 # uses prompt_toolkit
 # pip install prompt_toolkit or pip install prompt_toolkit colorama
 
@@ -36,7 +36,7 @@ except ImportError:
     msvcrt = None
 
 MINTS = ["P", "D", "S", "W", "No Mint"]
-SESSION_TYPES = ["Bulk sorting", "Coin roll hunt", "Collection sorting", "Inventory audit", "Other"]
+SESSION_TYPES = ["Bulk sorting", "Coin roll hunt", "Other"]
 
 APP_NAME = "MTS CoinSort"
 APP_SLUG = "mts-coinsort"
@@ -82,6 +82,7 @@ DEFAULT_HOTKEYS = {
     "keep_bulk": "*",
     "mint_next": "+",
     "mint_previous": "-",
+    "type_next": ".",
     "save_quit": "q",
 }
 
@@ -90,6 +91,7 @@ HOTKEY_LABELS = {
     "keep_bulk": "Toggle Keep/Bulk",
     "mint_next": "Next Mint",
     "mint_previous": "Previous Mint",
+    "type_next": "Next Coin Type",
     "save_quit": "Save + Quit",
 }
 
@@ -98,7 +100,8 @@ CSV_HEADERS = [
     "timestamp", "session_name", "session_type", "country", "denomination", "currency", "face_value",
     "year", "mint", "coin_type", "numista_number", "numista_title", "numista_category", "notes",
     "reject", "reject_reason", "keep_bulk",
-    "numista_found", "possible_missing_collection", "new_collection"
+    "numista_found", "possible_missing_collection", "new_collection",
+    "roll_mode", "roll_number", "roll_coin_number", "roll_quantity"
 ]
 
 COIN_TYPES_HEADERS = [
@@ -128,13 +131,14 @@ KEY_ESC = "ESC"
 KEY_TAB = "TAB"
 KEY_SHIFT_TAB = "SHIFT_TAB"
 
-FOCUS_ORDER = ["year", "mint", "coin_type", "save", "notes", "recent", "change_denom", "statistics", "quit"]
+FOCUS_ORDER = ["year", "mint", "coin_type", "save", "notes", "recent", "change_denom", "session_notes", "next_roll", "statistics", "quit"]
 
 # ANSI color/bold works in most Linux terminals.
 # On Windows, we attempt to enable Virtual Terminal Processing. If that is not
 # available, the app falls back to plain text plus cls-based screen clears.
 USE_COLOR = True
 BIG_UI = True
+ROLL_QUANTITIES = {}
 ANSI_SUPPORTED = os.name != "nt"
 
 def enable_ansi_on_windows():
@@ -297,7 +301,7 @@ def ensure_app_dirs():
     os.makedirs(EXPORTS_DIR, exist_ok=True)
 
 def load_settings():
-    global HOTKEYS, USE_COLOR, BIG_UI
+    global HOTKEYS, USE_COLOR, BIG_UI, ROLL_QUANTITIES
     HOTKEYS = DEFAULT_HOTKEYS.copy()
     if not os.path.exists(SETTINGS_PATH):
         ensure_app_dirs()
@@ -317,9 +321,11 @@ def load_settings():
                 HOTKEYS[action] = saved_hotkeys[action]
         USE_COLOR = bool(data.get("use_color", USE_COLOR))
         BIG_UI = bool(data.get("big_ui", BIG_UI))
+        ROLL_QUANTITIES = normalize_roll_quantities(data.get("roll_quantities", {}))
         ensure_app_dirs()
     except Exception:
         HOTKEYS = DEFAULT_HOTKEYS.copy()
+        ROLL_QUANTITIES = {}
         ensure_app_dirs()
 
 def save_settings():
@@ -329,9 +335,170 @@ def save_settings():
         "hotkeys": HOTKEYS,
         "use_color": USE_COLOR,
         "big_ui": BIG_UI,
+        "roll_quantities": ROLL_QUANTITIES,
     }
     with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
+
+
+def normalize_roll_quantities(value):
+    """Return a clean {country|face_value|currency: int} roll quantity map."""
+    cleaned = {}
+    if not isinstance(value, dict):
+        return cleaned
+    for raw_key, raw_qty in value.items():
+        try:
+            qty = int(raw_qty)
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0:
+            continue
+        parts = str(raw_key).split("|")
+        if len(parts) >= 3:
+            key = roll_quantity_key(parts[0], parts[1], "|".join(parts[2:]))
+        else:
+            key = str(raw_key).strip()
+        if key:
+            cleaned[key] = qty
+    return cleaned
+
+def roll_quantity_key(country, face_value, currency):
+    return f"{str(country).strip()}|{normalize_decimal(face_value)}|{str(currency).strip()}"
+
+def roll_quantity_label(key, qty):
+    parts = str(key).split("|", 2)
+    if len(parts) == 3:
+        country, face_value, currency = parts
+        denom = make_denom_label(face_value, currency)
+        return f"{country} | {denom} = {qty} coins/roll"
+    return f"{key} = {qty} coins/roll"
+
+def get_roll_quantity_for_choice(choice):
+    key = roll_quantity_key(choice.get("country", ""), choice.get("face_value", ""), choice.get("currency", ""))
+    return ROLL_QUANTITIES.get(key)
+
+def get_roll_quantity(session):
+    return get_roll_quantity_for_choice(session)
+
+def prompt_positive_int(title, default=""):
+    while True:
+        value = text_input(title, str(default) if default else "")
+        if value is None:
+            return None
+        try:
+            number = int(value)
+        except ValueError:
+            number = 0
+        if number > 0:
+            return number
+        clear()
+        print(red("Please enter a whole number greater than 0."))
+        print("Press any key to try again.")
+        read_key()
+
+def coin_roll_quantities_menu(numista_countries=None, denoms_by_country=None):
+    """Settings sub-page for user-defined roll quantities by country/denomination."""
+    global ROLL_QUANTITIES
+    numista_countries = numista_countries or []
+    denoms_by_country = denoms_by_country or {}
+    index = 0
+
+    while True:
+        entries = sorted(ROLL_QUANTITIES.items(), key=lambda item: item[0].lower())
+        menu_items = [roll_quantity_label(key, qty) for key, qty in entries]
+        menu_items += ["Add / edit from Numista denominations", "Add / edit custom entry", "Delete selected roll quantity", "Back"]
+        index = max(0, min(index, len(menu_items) - 1))
+
+        clear()
+        print(c("=" * 100, "94"))
+        print(bold(cyan("COIN ROLL QUANTITIES".center(100))))
+        print(c("=" * 100, "94"))
+        print()
+        print(dim("These are saved in settings.json and are not hard-coded."))
+        print(dim("Format: Country | denomination = coins per roll"))
+        print()
+        if not entries:
+            print(yellow("No roll quantities saved yet."))
+            print()
+
+        for i, item in enumerate(menu_items):
+            print(reverse(item) if i == index else item)
+
+        print()
+        print(dim("TAB/DOWN/+ next | UP/- previous | ENTER select | BACKSPACE/ESC back"))
+        key = read_key()
+        if key in (KEY_BACKSPACE, KEY_ESC):
+            save_settings()
+            return
+        if key in (KEY_TAB, KEY_DOWN, "+", "="):
+            index = (index + 1) % len(menu_items)
+            continue
+        if key in (KEY_SHIFT_TAB, KEY_UP, "-", "_"):
+            index = (index - 1) % len(menu_items)
+            continue
+        if key != KEY_ENTER:
+            continue
+
+        selected = menu_items[index]
+        if index < len(entries):
+            key_name, current_qty = entries[index]
+            qty = prompt_positive_int(f"Edit coins per roll for:\n{roll_quantity_label(key_name, current_qty)}", current_qty)
+            if qty is not None:
+                ROLL_QUANTITIES[key_name] = qty
+                save_settings()
+            continue
+
+        if selected == "Add / edit from Numista denominations":
+            if not numista_countries:
+                clear()
+                print(yellow("No Numista countries/denominations are loaded yet."))
+                print("Use custom entry, or add Numista CSV files and restart.")
+                print("Press any key to continue.")
+                read_key()
+                continue
+            choice = choose_country_and_denom(numista_countries, denoms_by_country)
+            if not choice:
+                continue
+            key_name = roll_quantity_key(choice["country"], choice["face_value"], choice["currency"])
+            qty = prompt_positive_int(f"Coins per roll for {choice['country']} | {choice['denomination']}:", ROLL_QUANTITIES.get(key_name, ""))
+            if qty is not None:
+                ROLL_QUANTITIES[key_name] = qty
+                save_settings()
+            continue
+
+        if selected == "Add / edit custom entry":
+            country = text_input("Country name for this roll quantity:")
+            if not country:
+                continue
+            face_value = text_input("Face value, for example 0.01, 0.25, 1.00:")
+            if not face_value:
+                continue
+            currency = text_input("Currency/denomination label, for example Dollar (1785-date), Euro, Peso:")
+            if currency is None:
+                continue
+            key_name = roll_quantity_key(country, face_value, currency)
+            qty = prompt_positive_int(f"Coins per roll for {country} | {make_denom_label(face_value, currency)}:", ROLL_QUANTITIES.get(key_name, ""))
+            if qty is not None:
+                ROLL_QUANTITIES[key_name] = qty
+                save_settings()
+            continue
+
+        if selected == "Delete selected roll quantity":
+            if not entries:
+                continue
+            labels = [roll_quantity_label(key, qty) for key, qty in entries]
+            picked = choose_from_list("Delete which roll quantity?", labels + ["Cancel"])
+            if picked and picked != "Cancel":
+                delete_index = labels.index(picked)
+                key_name = entries[delete_index][0]
+                if prompt_yes_no("Delete this roll quantity?", roll_quantity_label(key_name, ROLL_QUANTITIES[key_name])):
+                    ROLL_QUANTITIES.pop(key_name, None)
+                    save_settings()
+            continue
+
+        if selected == "Back":
+            save_settings()
+            return
 
 def reset_hotkeys_to_default():
     global HOTKEYS
@@ -346,10 +513,10 @@ def read_assignable_key():
         # Keep arrows, Tab, Enter, and normal printable keys assignable.
         return key
 
-def settings_menu():
+def settings_menu(numista_countries=None, denoms_by_country=None):
     global USE_COLOR, BIG_UI
     actions = list(DEFAULT_HOTKEYS.keys())
-    menu_items = [HOTKEY_LABELS[action] for action in actions] + ["Toggle colors", "Toggle big title", "Reset hotkeys to defaults", "Back"]
+    menu_items = [HOTKEY_LABELS[action] for action in actions] + ["Coin roll quantities", "Toggle colors", "Toggle big title", "Reset hotkeys to defaults", "Back"]
     index = 0
 
     while True:
@@ -427,6 +594,8 @@ def settings_menu():
                     read_key()
                 save_settings()
                 break
+        elif selected == "Coin roll quantities":
+            coin_roll_quantities_menu(numista_countries, denoms_by_country)
         elif selected == "Toggle colors":
             USE_COLOR = not USE_COLOR
             save_settings()
@@ -1255,6 +1424,52 @@ def load_session_csv(path):
     with open(path, "r", newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
+def session_meta_path(csv_path):
+    return os.path.splitext(csv_path)[0] + ".session.json"
+
+def load_session_meta(csv_path):
+    path = session_meta_path(csv_path)
+    if not os.path.exists(path):
+        return {"session_name": "", "session_notes": ""}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {
+            "session_name": str(data.get("session_name", "")),
+            "session_notes": str(data.get("session_notes", "")),
+        }
+    except Exception:
+        return {"session_name": "", "session_notes": ""}
+
+def save_session_meta(session):
+    csv_path = session.get("path", "")
+    if not csv_path:
+        return
+    data = {
+        "session_name": session.get("session_name", ""),
+        "session_notes": session.get("session_notes", ""),
+        "updated": datetime.now().isoformat(timespec="seconds"),
+    }
+    try:
+        with open(session_meta_path(csv_path), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+def edit_session_notes(session):
+    current = session.get("session_notes", "")
+    updated = text_input("Edit session notes. Examples: where coins came from, what you paid, cool finds:", current)
+    if updated is None:
+        return False
+    session["session_notes"] = updated
+    save_session_meta(session)
+    clear()
+    print(green("Session notes saved."))
+    print()
+    print("Press any key to continue.")
+    read_key()
+    return True
+
 def text_input(prompt, default=""):
     value = default
     while True:
@@ -1302,18 +1517,74 @@ def list_sessions():
     files.sort(key=lambda f: os.path.getmtime(os.path.join(SESSIONS_DIR, f)), reverse=True)
     return files
 
+
+def confirm_session_type(session_type):
+    if session_type not in ("Bulk sorting", "Coin roll hunt"):
+        return True
+    detail = (
+        "This mode is for quickly adding year + mint mark entries."
+        if session_type == "Bulk sorting"
+        else "This mode is for coin roll hunting with optional roll tracking."
+    )
+    return bool(prompt_yes_no(f"Start {session_type}?", detail))
+
+def choose_crh_roll_mode(coin_choice):
+    mode = choose_from_list(
+        "Coin Roll Hunt roll tracking mode:",
+        ["Automatic roll tracking", "Manual next-roll selection", "No roll tracking"]
+    )
+    if not mode:
+        return None, None
+    if mode == "No roll tracking":
+        return "none", ""
+
+    qty = get_roll_quantity_for_choice(coin_choice)
+    if not qty:
+        add_now = prompt_yes_no(
+            "No roll quantity saved for this denomination.",
+            "Automatic tracking needs coins-per-roll. Add it to settings now?"
+        )
+        if add_now:
+            key_name = roll_quantity_key(coin_choice["country"], coin_choice["face_value"], coin_choice["currency"])
+            qty = prompt_positive_int(f"Coins per roll for {coin_choice['country']} | {coin_choice['denomination']}:")
+            if qty is None:
+                return None, None
+            ROLL_QUANTITIES[key_name] = qty
+            save_settings()
+        elif mode == "Automatic roll tracking":
+            return None, None
+
+    if mode == "Automatic roll tracking":
+        return "automatic", get_roll_quantity_for_choice(coin_choice)
+    return "manual", get_roll_quantity_for_choice(coin_choice) or ""
+
 def new_session(numista_countries, denoms_by_country):
     session_name = text_input("Enter new session name:")
     if not session_name:
         return None
 
+    session_notes = text_input("Enter session notes, optional. Example: where the coins came from, what you paid, cool finds:")
+    if session_notes is None:
+        session_notes = ""
+
     session_type = choose_from_list("Select session type:", SESSION_TYPES)
     if not session_type:
+        return None
+    if not confirm_session_type(session_type):
         return None
 
     coin_choice = choose_country_and_denom(numista_countries, denoms_by_country)
     if not coin_choice:
         return None
+
+    roll_mode = ""
+    roll_quantity = ""
+    current_roll = 1
+    current_roll_count = 0
+    if session_type == "Coin roll hunt":
+        roll_mode, roll_quantity = choose_crh_roll_mode(coin_choice)
+        if roll_mode is None:
+            return None
 
     path = session_path(session_name)
     if os.path.exists(path):
@@ -1323,6 +1594,7 @@ def new_session(numista_countries, denoms_by_country):
         )
         if choice == "Resume existing session":
             log = load_session_csv(path)
+            current_roll, current_roll_count = infer_roll_state(log, roll_quantity)
         elif choice == "Overwrite and start fresh":
             log = []
             write_session_csv(path, log)
@@ -1332,7 +1604,23 @@ def new_session(numista_countries, denoms_by_country):
         log = []
         write_session_csv(path, log)
 
-    return {"session_name": session_name, "session_type": session_type, "country": coin_choice["country"], "denomination": coin_choice["denomination"], "currency": coin_choice["currency"], "face_value": coin_choice["face_value"], "path": path, "log": log}
+    session_obj = {
+        "session_name": session_name,
+        "session_type": session_type,
+        "country": coin_choice["country"],
+        "denomination": coin_choice["denomination"],
+        "currency": coin_choice["currency"],
+        "face_value": coin_choice["face_value"],
+        "path": path,
+        "log": log,
+        "session_notes": session_notes,
+        "roll_mode": roll_mode,
+        "roll_quantity": roll_quantity,
+        "current_roll": current_roll,
+        "current_roll_count": current_roll_count,
+    }
+    save_session_meta(session_obj)
+    return session_obj
 
 def confirm_delete_session(filename, path):
     selection = None
@@ -2017,6 +2305,28 @@ def home_statistics_menu():
     title = "COMBINED SESSION STATISTICS" if len(picked_files) > 1 else "SESSION STATISTICS"
     show_statistics_page(title, rows, picked_files, "ENTER/BACKSPACE/ESC returns to home menu.")
 
+
+def infer_roll_state(log, roll_quantity=""):
+    """Return next current roll and count within roll from saved CRH rows."""
+    if not log:
+        return 1, 0
+    last = log[-1]
+    try:
+        roll = int(last.get("roll_number") or 1)
+    except ValueError:
+        roll = 1
+    try:
+        count = int(last.get("roll_coin_number") or 0)
+    except ValueError:
+        count = 0
+    try:
+        qty = int(roll_quantity or last.get("roll_quantity") or 0)
+    except ValueError:
+        qty = 0
+    if qty and count >= qty:
+        return roll + 1, 0
+    return max(1, roll), max(0, count)
+
 def resume_session(numista_countries, denoms_by_country):
     selected_file = choose_session_file_for_resume()
     if not selected_file:
@@ -2024,10 +2334,11 @@ def resume_session(numista_countries, denoms_by_country):
 
     path = os.path.join(SESSIONS_DIR, selected_file)
     log = load_session_csv(path)
+    meta = load_session_meta(path)
 
     if log:
         first = log[0]
-        session_name = first.get("session_name", selected_file.replace(".csv", ""))
+        session_name = meta.get("session_name") or first.get("session_name", selected_file.replace(".csv", ""))
         session_type = first.get("session_type", "Unknown")
         country = first.get("country", "")
         denomination = first.get("denomination", "Unknown")
@@ -2042,7 +2353,7 @@ def resume_session(numista_countries, denoms_by_country):
             currency = coin_choice["currency"]
             face_value = coin_choice["face_value"]
     else:
-        session_name = selected_file.replace(".csv", "")
+        session_name = meta.get("session_name") or selected_file.replace(".csv", "")
         session_type = "Unknown"
         coin_choice = choose_country_and_denom(numista_countries, denoms_by_country)
         if not coin_choice:
@@ -2052,7 +2363,11 @@ def resume_session(numista_countries, denoms_by_country):
         currency = coin_choice["currency"]
         face_value = coin_choice["face_value"]
 
-    return {"session_name": session_name, "session_type": session_type, "country": country, "denomination": denomination, "currency": currency, "face_value": face_value, "path": path, "log": log}
+    roll_mode = first.get("roll_mode", "") if log else ""
+    roll_quantity = first.get("roll_quantity", "") if log else ""
+    current_roll, current_roll_count = infer_roll_state(log, roll_quantity)
+
+    return {"session_name": session_name, "session_type": session_type, "country": country, "denomination": denomination, "currency": currency, "face_value": face_value, "path": path, "log": log, "session_notes": meta.get("session_notes", ""), "roll_mode": roll_mode, "roll_quantity": roll_quantity, "current_roll": current_roll, "current_roll_count": current_roll_count}
 
 def session_menu():
     ensure_sessions_dir()
@@ -2085,7 +2400,7 @@ def session_menu():
         elif choice == "Export Data":
             export_menu()
         elif choice == "Settings":
-            settings_menu()
+            settings_menu(numista_countries, denoms_by_country)
         elif choice == "Quit" or choice is None:
             return None
 
@@ -2115,7 +2430,7 @@ def coin_type_label(row):
     number_text = f" | {numista_number}" if numista_number else ""
     return f"{year}-{mint} | {coin_type}{number_text} | {denom} | {country}"
 
-def make_coin(session_name, session_type, country, denom, currency, face_value, year, mint_index, coin_type_option, notes, reject, reject_reason, keep_bulk, numista_found="", possible_missing_collection="", new_collection=False):
+def make_coin(session_name, session_type, country, denom, currency, face_value, year, mint_index, coin_type_option, notes, reject, reject_reason, keep_bulk, numista_found="", possible_missing_collection="", new_collection=False, roll_mode="", roll_number="", roll_coin_number="", roll_quantity=""):
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "session_name": session_name,
@@ -2137,6 +2452,10 @@ def make_coin(session_name, session_type, country, denom, currency, face_value, 
         "numista_found": str(numista_found),
         "possible_missing_collection": str(possible_missing_collection),
         "new_collection": str(boolish(new_collection) if isinstance(new_collection, str) else bool(new_collection)),
+        "roll_mode": roll_mode,
+        "roll_number": str(roll_number),
+        "roll_coin_number": str(roll_coin_number),
+        "roll_quantity": str(roll_quantity),
     }
 
 def reset_coin():
@@ -2277,6 +2596,58 @@ def next_focus(focus, direction=1):
     i = FOCUS_ORDER.index(focus)
     return FOCUS_ORDER[(i + direction) % len(FOCUS_ORDER)]
 
+
+
+def prompt_manual_roll_overflow(session, next_coin_number, roll_quantity):
+    """Manual CRH overflow guard.
+
+    Returns:
+      "extra"     -> save this coin in the current roll even though it exceeds the roll quantity
+      "next_roll" -> advance to the next roll and save this coin as coin #1 there
+      None        -> cancel save and return to entry
+    """
+    selection = 0
+    options = [
+        ("extra", "Confirm extra coin in current roll"),
+        ("next_roll", "Start next roll and add this coin there"),
+        ("cancel", "Cancel and return to entry"),
+    ]
+
+    while True:
+        clear()
+        current_roll = int(session.get("current_roll", 1) or 1)
+        print(c("=" * 100, "93"))
+        print(bold(yellow("MANUAL CRH ROLL LIMIT REACHED".center(100))))
+        print(c("=" * 100, "93"))
+        print()
+        print(bold("Current roll:"), green(str(current_roll)))
+        print(bold("Saved coins in this roll:"), green(str(session.get("current_roll_count", 0))))
+        print(bold("Expected coins per roll:"), cyan(str(roll_quantity)))
+        print()
+        print(yellow(f"Saving this coin would make roll {current_roll} contain {next_coin_number} coins."))
+        print(dim("Choose whether this is an intentional extra coin, or whether this coin should begin the next roll."))
+        print()
+
+        for i, (_, label) in enumerate(options):
+            prefix = "> " if i == selection else "  "
+            line = prefix + label
+            print(reverse(line) if i == selection else line)
+
+        print()
+        print(dim("TAB/DOWN/+ next | UP/- previous | ENTER confirm | BACKSPACE/ESC cancel"))
+        key = read_key()
+        if key in (KEY_BACKSPACE, KEY_ESC):
+            return None
+        if key in (KEY_TAB, KEY_DOWN, "+", "="):
+            selection = (selection + 1) % len(options)
+            continue
+        if key in (KEY_SHIFT_TAB, KEY_UP, "-", "_"):
+            selection = (selection - 1) % len(options)
+            continue
+        if key == KEY_ENTER:
+            value = options[selection][0]
+            return None if value == "cancel" else value
+
 def save_current_coin(session, year, mint_index, coin_type_index, notes, reject, reject_reason, keep_bulk, editing_index, numista_index=None):
     if not (len(year) == 4 and year.isdigit()):
         return False, editing_index
@@ -2316,9 +2687,36 @@ def save_current_coin(session, year, mint_index, coin_type_index, notes, reject,
         if not reject_reason:
             return False, editing_index
 
+    roll_mode = session.get("roll_mode", "")
+    roll_number = ""
+    roll_coin_number = ""
+    roll_quantity = session.get("roll_quantity", "") or ""
+    manual_overflow_action = None
+
+    if session.get("session_type") == "Coin roll hunt" and roll_mode in ("automatic", "manual") and editing_index is None:
+        roll_number = int(session.get("current_roll", 1) or 1)
+        roll_coin_number = int(session.get("current_roll_count", 0) or 0) + 1
+
+        # In manual CRH mode, do not silently overfill a roll. If the user
+        # enters coin #51 in a 50-coin roll, they can either confirm the extra
+        # coin in the current roll or move that coin into the next roll as #1.
+        if roll_mode == "manual":
+            try:
+                qty = int(roll_quantity or 0)
+            except ValueError:
+                qty = 0
+            if qty and roll_coin_number > qty:
+                manual_overflow_action = prompt_manual_roll_overflow(session, roll_coin_number, qty)
+                if manual_overflow_action is None:
+                    return False, editing_index
+                if manual_overflow_action == "next_roll":
+                    roll_number += 1
+                    roll_coin_number = 1
+
     coin = make_coin(
         session["session_name"], session["session_type"], session.get("country", ""), session["denomination"], session.get("currency", ""), session.get("face_value", ""),
-        year, mint_index, coin_type_option, notes, reject, reject_reason, keep_bulk, numista_found, possible_missing, new_collection
+        year, mint_index, coin_type_option, notes, reject, reject_reason, keep_bulk, numista_found, possible_missing, new_collection,
+        roll_mode, roll_number, roll_coin_number, roll_quantity
     )
 
     if editing_index is not None:
@@ -2326,8 +2724,20 @@ def save_current_coin(session, year, mint_index, coin_type_index, notes, reject,
         editing_index = None
     else:
         session["log"].append(coin)
+        if session.get("session_type") == "Coin roll hunt" and session.get("roll_mode") in ("automatic", "manual"):
+            session["current_roll"] = int(roll_number or session.get("current_roll", 1) or 1)
+            session["current_roll_count"] = int(roll_coin_number or 0)
+            if session.get("roll_mode") == "automatic":
+                try:
+                    qty = int(session.get("roll_quantity") or 0)
+                except ValueError:
+                    qty = 0
+                if qty and session["current_roll_count"] >= qty:
+                    session["current_roll"] = int(session.get("current_roll", 1) or 1) + 1
+                    session["current_roll_count"] = 0
 
     write_session_csv(session["path"], session["log"])
+    save_session_meta(session)
     return True, editing_index
 
 def session_counts(log):
@@ -2356,6 +2766,8 @@ def draw(session, year, mint_index, coin_type_index, notes, reject, reject_reaso
         print(bold(cyan("COIN SORTER")))
 
     print(f"{bold('Session:')} {session['session_name']}    {bold('Type:')} {session['session_type']}")
+    if session.get("session_notes"):
+        print(f"{bold('Session Notes:')} {session.get('session_notes')}")
     print(f"{bold('Country:')} {session.get('country', 'Unknown')}    {bold('Denomination:')} {session['denomination']}")
     print(f"{bold('File:')} {session['path']}")
     if session.get("numista_csv_count", 0):
@@ -2367,9 +2779,16 @@ def draw(session, year, mint_index, coin_type_index, notes, reject, reject_reaso
 
     total_sorted, today_sorted = session_counts(log)
     print(f"{bold('Sorted in this CSV:')} {green(str(total_sorted))} total    {bold('Today:')} {green(str(today_sorted))}")
+    if session.get("session_type") == "Coin roll hunt":
+        roll_mode = session.get("roll_mode") or "none"
+        if roll_mode in ("automatic", "manual"):
+            qty = session.get("roll_quantity") or "?"
+            print(f"{bold('CRH Roll Tracking:')} {cyan(roll_mode)}    {bold('Current roll:')} {green(str(session.get('current_roll', 1)))}    {bold('Coins in roll:')} {green(str(session.get('current_roll_count', 0)))}/{qty}")
+        else:
+            print(f"{bold('CRH Roll Tracking:')} {dim('off')}")
     print()
-    print(cyan("Flow:"), "Year → Mint → Type → ENTER saves/adds coin  |  TAB moves selection  |  + / - changes selected option")
-    print(cyan("Controls:"), f"TAB = move   ENTER = select/save   + / - = change mint/options   {key_display(HOTKEYS['reject'])} = REJECT   {key_display(HOTKEYS['keep_bulk'])} = KEEP/BULK")
+    print(cyan("Flow:"), "Year → Mint → ENTER saves/adds coin  |  numpad . cycles Type  |  TAB moves selection")
+    print(cyan("Controls:"), f"TAB = move   ENTER = select/save   + / - = mint   {key_display(HOTKEYS['type_next'])} = type   {key_display(HOTKEYS['reject'])} = REJECT   {key_display(HOTKEYS['keep_bulk'])} = KEEP/BULK")
     print(dim(f"Year is checked live. Max allowed year: {current_year() + 1}."))    
     print(dim("TAB only changes which field/action is selected. It does not change mint or toggle anything."))
     print(c("-" * 110, "94"))
@@ -2409,8 +2828,8 @@ def draw(session, year, mint_index, coin_type_index, notes, reject, reject_reaso
     if warning:
         print("  " + yellow(warning))
         print()
-    box_line("Mint", mint_value, "mint", "+ / - changes mint")
-    box_line("Type", coin_type_value, "coin_type", "+ / - changes type; Numista links are clickable in supported terminals")
+    box_line("Mint", mint_value, "mint", "+ / - changes mint; ENTER saves")
+    box_line("Type", coin_type_value, "coin_type", "numpad . changes type; Numista links are clickable in supported terminals")
     box_line("Save Coin", green("manual save if you tab here"), "save", "")
     box_line("Notes", notes_value, "notes", "required if Type is OTHER")
 
@@ -2419,6 +2838,9 @@ def draw(session, year, mint_index, coin_type_index, notes, reject, reject_reaso
     print()
     print(f"{(reverse(' Recent/Edit ') if focus == 'recent' else bold(' Recent/Edit '))} {dim('ENTER opens full previous-coin edit list')}")
     print(f"{(reverse(' Change Country/Denom ') if focus == 'change_denom' else bold(' Change Country/Denom '))} {dim('ENTER changes active sorting selection')}")
+    print(f"{(reverse(' Edit Session Notes ') if focus == 'session_notes' else bold(' Edit Session Notes '))} {dim('ENTER edits title-level notes for this session')}")
+    if session.get("session_type") == "Coin roll hunt" and session.get("roll_mode") == "manual":
+        print(f"{(reverse(' Next Roll ') if focus == 'next_roll' else bold(' Next Roll '))} {dim('ENTER starts the next roll manually')}")
     print(f"{(reverse(' Statistics ') if focus == 'statistics' else bold(' Statistics '))} {dim('ENTER opens session statistics page')}")
     print(f"{(reverse(' Save + Quit ') if focus == 'quit' else bold(' Save + Quit '))} {dim('ENTER opens confirmation')}")
 
@@ -2449,9 +2871,9 @@ def draw(session, year, mint_index, coin_type_index, notes, reject, reject_reaso
     if focus == "year":
         print("Type the year. You can TAB to menus anytime, but the coin will not save unless the year is exactly 4 digits.")
     elif focus == "mint":
-        print("Use + or - to choose the mint. ENTER or TAB moves to Type.")
+        print("Use + or - to choose the mint. ENTER saves the coin. Use numpad . anytime to change Type.")
     elif focus == "coin_type":
-        print("Use + or - to choose the detected Numista type. ENTER saves. Choose OTHER only when it is not listed; notes are required for OTHER.")
+        print("Use numpad . to choose the detected Numista type. ENTER saves. Choose OTHER only when it is not listed; notes are required for OTHER.")
     elif focus == "save":
         print("Press ENTER to save this coin and start the next coin. This is the manual save step if you tabbed past Mint.")
     elif focus == "notes":
@@ -2460,6 +2882,13 @@ def draw(session, year, mint_index, coin_type_index, notes, reject, reject_reaso
         print("Press ENTER to open the full previous-coin edit list. TAB only moves selection.")
     elif focus == "change_denom":
         print("Press ENTER to choose a different country and denomination from your Numista CSV.")
+    elif focus == "session_notes":
+        print("Press ENTER to edit session-level notes, such as cool finds, where coins came from, or what you paid.")
+    elif focus == "next_roll":
+        if session.get("session_type") == "Coin roll hunt" and session.get("roll_mode") == "manual":
+            print("Press ENTER when you are ready to start the next roll.")
+        else:
+            print("Next Roll is only active for manual Coin Roll Hunt sessions.")
     elif focus == "statistics":
         print("Press ENTER to open a separate statistics page for this session CSV.")
     elif focus == "quit":
@@ -2603,9 +3032,27 @@ def confirm_save_quit(session):
         key = read_key()
         if key == KEY_ENTER:
             write_session_csv(session["path"], session["log"])
+            save_session_meta(session)
             return True
         if key in (KEY_BACKSPACE, KEY_ESC):
             return False
+
+
+def advance_manual_roll(session):
+    if session.get("session_type") != "Coin roll hunt" or session.get("roll_mode") != "manual":
+        return False
+    session["current_roll"] = int(session.get("current_roll", 1) or 1) + 1
+    session["current_roll_count"] = 0
+    clear()
+    print(c("=" * 90, "92"))
+    print(bold(green("NEXT ROLL STARTED".center(90))))
+    print(c("=" * 90, "92"))
+    print()
+    print(f"Current roll: {green(str(session['current_roll']))}")
+    print()
+    print("Press any key to continue.")
+    read_key()
+    return True
 
 def sorting_loop(session):
     numista_index = session.get("numista_index")
@@ -2703,24 +3150,23 @@ def sorting_loop(session):
                 reject_reason = ""
             continue
 
-        # + / - changes the highlighted type when Type is selected; otherwise it changes mint.
+        # Numpad . cycles coin type from anywhere so ENTER can stay as Mint confirm/save.
+        if hotkey_matches(key, "type_next"):
+            options = get_detected_type_options(session, year, MINTS[mint_index])
+            coin_type_index = (coin_type_index + 1) % len(options)
+            focus = "coin_type"
+            continue
+
+        # + / - changes mint.
         if hotkey_matches(key, "mint_next"):
-            if focus == "coin_type":
-                options = get_detected_type_options(session, year, MINTS[mint_index])
-                coin_type_index = (coin_type_index + 1) % len(options)
-            else:
-                mint_index = (mint_index + 1) % len(MINTS)
-                coin_type_index = 0
-                focus = "mint"
+            mint_index = (mint_index + 1) % len(MINTS)
+            coin_type_index = 0
+            focus = "mint"
             continue
         if hotkey_matches(key, "mint_previous"):
-            if focus == "coin_type":
-                options = get_detected_type_options(session, year, MINTS[mint_index])
-                coin_type_index = (coin_type_index - 1) % len(options)
-            else:
-                mint_index = (mint_index - 1) % len(MINTS)
-                coin_type_index = 0
-                focus = "mint"
+            mint_index = (mint_index - 1) % len(MINTS)
+            coin_type_index = 0
+            focus = "mint"
             continue
 
         # TAB changes the selected area only. It never opens a menu, saves, toggles, or changes an option.
@@ -2762,7 +3208,7 @@ def sorting_loop(session):
             if focus == "year":
                 focus = "mint"
             elif focus == "mint":
-                focus = "coin_type"
+                finish_save()
             elif focus == "coin_type":
                 finish_save()
             elif focus == "save":
@@ -2778,6 +3224,12 @@ def sorting_loop(session):
             elif focus == "change_denom":
                 if change_current_country_denom(session):
                     coin_type_index = 0
+                focus = "year"
+            elif focus == "session_notes":
+                edit_session_notes(session)
+                focus = "year"
+            elif focus == "next_roll":
+                advance_manual_roll(session)
                 focus = "year"
             elif focus == "statistics":
                 statistics_menu(session)
