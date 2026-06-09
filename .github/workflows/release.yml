@@ -79,6 +79,15 @@ jobs:
           cp dist/MTS-CoinSort AppDir/usr/bin/MTS-CoinSort
 
           printf '%s\n' \
+            '#!/bin/sh' \
+            'HERE="$(dirname "$(readlink -f "$0")")"' \
+            'exec "$HERE/usr/bin/MTS-CoinSort" "$@"' \
+            > AppDir/AppRun
+
+          chmod +x AppDir/AppRun
+          chmod +x AppDir/usr/bin/MTS-CoinSort
+
+          printf '%s\n' \
             '[Desktop Entry]' \
             'Type=Application' \
             'Name=MTS CoinSort' \
