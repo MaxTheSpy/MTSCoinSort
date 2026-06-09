@@ -917,6 +917,34 @@ def prompt_numista_country_denom_from_api(default_country=""):
             read_key()
             continue
 
+        cached_row = best_cached_numista_row(clean_number)
+        if cached_row:
+            local_choice_action = confirm_cached_numista_row(cached_row, clean_number, "country/denomination selection")
+            if local_choice_action is None:
+                return None
+            if local_choice_action == "use":
+                choice = cached_row_choice(cached_row)
+                if not choice:
+                    clear()
+                    print(red("The local cached row did not contain enough country/denomination data."))
+                    print("The script will continue to the Numista API refresh path.")
+                    print("Press any key to continue.")
+                    read_key()
+                else:
+                    all_rows = read_coin_type_cache_rows()
+                    remove_custom_denominations_for_country_face(choice.get("country", ""), choice.get("face_value", ""))
+                    clear()
+                    print(green("Using saved local Numista type."))
+                    print()
+                    print(f"Now sorting: {cyan(choice['country'])} | {cyan(choice['denomination'])}")
+                    print(f"Saved type: N# {cached_row.get('numista_number', '')} - {cached_row.get('numista_title', '')}")
+                    print()
+                    print(dim("Next, type the coin year and mint. The cached type should appear when the year matches its saved year/range."))
+                    print("Press any key to continue.")
+                    read_key()
+                    choice["_numista_type_index"] = build_type_index_from_cache(all_rows)
+                    return choice
+
         details, error = numista_fetch_type_details(clean_number)
         if error:
             clear()
@@ -1748,6 +1776,158 @@ def read_coin_type_cache_rows():
     return rows
 
 
+def find_cached_numista_rows(numista_number):
+    """Return Coin_Types.csv rows already saved for this Numista N#.
+
+    This prevents unnecessary API calls when the user enters an N# that the
+    sorter already learned from a Numista export or a previous API lookup.
+    """
+    clean_number = clean_numista_number(numista_number)
+    if not clean_number:
+        return []
+    rows = []
+    for row in read_coin_type_cache_rows():
+        if clean_numista_number(row.get("numista_number", "")) == clean_number:
+            rows.append(row)
+
+    def row_sort_key(row):
+        source = str(row.get("source", ""))
+        # Prefer API rows because they usually have the broad Numista year range.
+        source_rank = 0 if source == "numista_api" else 1 if source == "manual_api" else 2
+        min_year, max_year = normalized_year_bounds(row)
+        return (
+            source_rank,
+            str(row.get("country", "")).lower(),
+            normalize_decimal(row.get("face_value", "")),
+            safe_int(min_year, 999999),
+            safe_int(max_year, 999999),
+            normalize_mint(row.get("mint", "")),
+        )
+
+    rows.sort(key=row_sort_key)
+    return rows
+
+
+def best_cached_numista_row(numista_number):
+    rows = find_cached_numista_rows(numista_number)
+    return rows[0] if rows else None
+
+
+def cached_row_choice(row):
+    """Create a country/denomination choice from a cached Coin_Types.csv row."""
+    if not row:
+        return None
+    country = str(row.get("country", "")).strip()
+    face_value = normalize_decimal(row.get("face_value", ""))
+    currency = normalize_currency_label(str(row.get("currency", "")).strip(), country)
+    denomination = str(row.get("denomination", "")).strip()
+    if not denomination or denomination == face_value:
+        denomination = make_denom_label(face_value, currency) if currency else denomination
+    if not country or not face_value:
+        return None
+    return {
+        "country": country,
+        "currency": currency,
+        "face_value": face_value,
+        "denomination": denomination,
+    }
+
+
+def cached_row_type_option(row, current_year="", current_mint="", match_note="local Coin_Types.csv cache"):
+    """Create the same option shape used by the normal type picker."""
+    choice = cached_row_choice(row) or {}
+    min_year, max_year = normalized_year_bounds(row)
+    mint = normalize_mint(current_mint if current_mint is not None else row.get("mint", ""))
+    return {
+        "coin_type": row.get("coin_type", "") or row.get("numista_title", "") or "Unknown type",
+        "numista_number": clean_numista_number(row.get("numista_number", "")),
+        "numista_title": row.get("numista_title", "") or row.get("coin_type", "") or "Unknown type",
+        "numista_category": row.get("numista_category", ""),
+        "denomination": choice.get("denomination", row.get("denomination", "")),
+        "country": choice.get("country", row.get("country", "")),
+        "currency": choice.get("currency", row.get("currency", "")),
+        "face_value": choice.get("face_value", normalize_decimal(row.get("face_value", ""))),
+        "year": str(current_year or row.get("year", "")).strip(),
+        "min_year": min_year,
+        "max_year": max_year,
+        "year_range": row.get("year_range", "") or year_range_label(min_year, max_year, row.get("year", "")),
+        "mint": mint,
+        "selected_mint": mint,
+        "source": row.get("source", ""),
+        "composition": row.get("composition", ""),
+        "weight": row.get("weight", ""),
+        "diameter": row.get("diameter", ""),
+        "thickness": row.get("thickness", ""),
+        "orientation": row.get("orientation", ""),
+        "comments": row.get("comments", ""),
+        "match_note": match_note,
+    }
+
+
+def confirm_cached_numista_row(row, numista_number, context="type"):
+    """Ask whether to use the local cached N# row or refresh from the API.
+
+    Returns:
+      "use"     -> use the local Coin_Types.csv row
+      "refresh" -> continue to Numista API lookup
+      None      -> cancel/back
+    """
+    selection = 0
+    actions = ["Use saved local type", "Refresh from Numista API", "Cancel"]
+    rows = find_cached_numista_rows(numista_number)
+    match_count = len(rows)
+
+    while True:
+        clear()
+        print(c("=" * 100, "94"))
+        print(bold(cyan("NUMISTA N# FOUND LOCALLY".center(100))))
+        print(c("=" * 100, "94"))
+        print()
+        print(green(f"N# {clean_numista_number(numista_number)} is already saved in Coin_Types.csv."))
+        print(dim("Using the saved row avoids another Numista API call. You can refresh if you want to replace/enrich it."))
+        print()
+        print(f"Saved matches: {match_count}")
+        print(f"Source      : {row.get('source', '') or 'unknown'}")
+        print(f"N#          : {cyan(clean_numista_number(row.get('numista_number', '')))}")
+        print(f"Title       : {bold(row.get('numista_title', '') or row.get('coin_type', '') or 'Unknown')}")
+        print(f"Coin type   : {row.get('coin_type', '') or 'Unknown'}")
+        print(f"Country     : {row.get('country', '') or 'Unknown'}")
+        print(f"Denomination: {row.get('denomination', '') or make_denom_label(row.get('face_value', ''), row.get('currency', '')) or 'Unknown'}")
+        print(f"Years       : {row.get('year_range', '') or year_range_label(*normalized_year_bounds(row)) or 'Unknown'}")
+        print(f"Mint        : {normalize_mint(row.get('mint', '')) or 'Any / No Mint'}")
+        if row.get("composition"):
+            print(f"Composition : {row.get('composition')}")
+        if row.get("weight"):
+            print(f"Weight      : {row.get('weight')} g")
+        if row.get("diameter"):
+            print(f"Diameter    : {row.get('diameter')} mm")
+        print()
+        print(dim(f"Context: {context}."))
+        print()
+        for i, action in enumerate(actions):
+            line = f"  {action}  "
+            print(reverse(line) if i == selection else line)
+        print()
+        print(dim("TAB/DOWN/+ next | UP/- previous | ENTER confirm | BACKSPACE/ESC cancel"))
+
+        key = read_key()
+        if key in (KEY_BACKSPACE, KEY_ESC):
+            return None
+        if key in (KEY_TAB, KEY_DOWN, "+", "="):
+            selection = (selection + 1) % len(actions)
+            continue
+        if key in (KEY_SHIFT_TAB, KEY_UP, "-", "_"):
+            selection = (selection - 1) % len(actions)
+            continue
+        if key == KEY_ENTER:
+            action = actions[selection]
+            if action == "Use saved local type":
+                return "use"
+            if action == "Refresh from Numista API":
+                return "refresh"
+            return None
+
+
 def write_coin_type_cache_rows(rows):
     ensure_app_dirs()
     with open(COIN_TYPES_PATH, "w", newline="", encoding="utf-8") as f:
@@ -1989,6 +2169,27 @@ def prompt_manual_coin_type(session, year, mint_name, existing_notes=""):
             print("Press any key to continue.")
             read_key()
             continue
+
+        cached_row = best_cached_numista_row(clean_number)
+        if cached_row:
+            local_choice_action = confirm_cached_numista_row(cached_row, clean_number, "OTHER coin type selection")
+            if local_choice_action is None:
+                return None, None
+            if local_choice_action == "use":
+                all_rows = read_coin_type_cache_rows()
+                session["numista_type_index"] = build_type_index_from_cache(all_rows)
+                option = cached_row_type_option(cached_row, current_year=year, current_mint=mint_name, match_note="local Coin_Types.csv cache")
+
+                # Trust the saved N# data for country/denomination. This lets a
+                # Canadian cent found while sorting US cents switch the active
+                # row/session fields to Canada automatically.
+                remove_custom_denominations_for_country_face(option.get("country", ""), option.get("face_value", ""))
+                session["country"] = option.get("country", session.get("country", ""))
+                session["currency"] = option.get("currency", session.get("currency", ""))
+                session["face_value"] = option.get("face_value", session.get("face_value", ""))
+                session["denomination"] = option.get("denomination", session.get("denomination", ""))
+
+                return option, option.get("coin_type", "")
 
         details, error = numista_fetch_type_details(clean_number)
         if error:
