@@ -12,6 +12,7 @@ import shutil
 import builtins
 import io
 import ctypes
+import webbrowser
 from datetime import datetime
 from collections import Counter
 
@@ -35,12 +36,10 @@ except ImportError:
     msvcrt = None
 
 MINTS = ["P", "D", "S", "W", "No Mint"]
-DENOMS = []  # Built from Numista CSV exports at startup.
 SESSION_TYPES = ["Bulk sorting", "Coin roll hunt", "Collection sorting", "Inventory audit", "Other"]
 
 APP_NAME = "MTS CoinSort"
 APP_SLUG = "mts-coinsort"
-
 
 def default_config_dir():
     """Return the OS-standard folder where settings.json should live.
@@ -56,7 +55,6 @@ def default_config_dir():
     root = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
     return os.path.join(root, APP_SLUG)
 
-
 def default_data_dir():
     """Return the OS-standard folder where sessions/exports/Numista CSV live."""
     if os.name == "nt":
@@ -67,11 +65,9 @@ def default_data_dir():
     root = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
     return os.path.join(root, APP_SLUG)
 
-
 def clean_user_path(path):
     """Expand ~ and environment variables from settings.json path values."""
     return os.path.abspath(os.path.expandvars(os.path.expanduser(str(path).strip())))
-
 
 CONFIG_DIR = default_config_dir()
 SETTINGS_PATH = os.path.join(CONFIG_DIR, "settings.json")
@@ -79,6 +75,7 @@ DATA_DIR = default_data_dir()
 SESSIONS_DIR = os.path.join(DATA_DIR, "coin_sort_sessions")
 NUMISTA_DIR = os.path.join(DATA_DIR, "Numista CSV")
 EXPORTS_DIR = os.path.join(DATA_DIR, "coin_sort_exports")
+COIN_TYPES_PATH = os.path.join(DATA_DIR, "Coin_Types.csv")
 
 DEFAULT_HOTKEYS = {
     "reject": "/",
@@ -97,19 +94,17 @@ HOTKEY_LABELS = {
 }
 
 HOTKEYS = DEFAULT_HOTKEYS.copy()
-DENOM_VALUES = {
-    "1 cent": "0.01",
-    "5 cent": "0.05",
-    "10 cent": "0.10",
-    "25 cent": "0.25",
-    "50 cent": "0.50",
-    "1 dollar": "1.00",
-}
 CSV_HEADERS = [
     "timestamp", "session_name", "session_type", "country", "denomination", "currency", "face_value",
     "year", "mint", "coin_type", "numista_number", "numista_title", "numista_category", "notes",
     "reject", "reject_reason", "keep_bulk",
     "numista_found", "possible_missing_collection", "new_collection"
+]
+
+COIN_TYPES_HEADERS = [
+    "source", "country", "currency", "face_value", "denomination", "year", "mint",
+    "coin_type", "numista_number", "numista_title", "numista_category",
+    "comments", "source_csv", "last_seen"
 ]
 
 REJECT_REASONS = [
@@ -141,7 +136,6 @@ FOCUS_ORDER = ["year", "mint", "coin_type", "save", "notes", "recent", "change_d
 USE_COLOR = True
 BIG_UI = True
 ANSI_SUPPORTED = os.name != "nt"
-
 
 def enable_ansi_on_windows():
     """Enable ANSI escape handling in modern Windows terminals when possible.
@@ -177,7 +171,6 @@ def enable_ansi_on_windows():
     except Exception:
         return False
 
-
 def configure_terminal_output():
     """Set global terminal capabilities after startup/settings load."""
     global ANSI_SUPPORTED, USE_COLOR
@@ -188,43 +181,33 @@ def configure_terminal_output():
     if not ANSI_SUPPORTED:
         USE_COLOR = False
 
-
 def c(text, code):
     if not USE_COLOR or not ANSI_SUPPORTED:
         return text
     return f"\033[{code}m{text}\033[0m"
 
-
 def bold(text):
     return c(text, "1")
-
 
 def cyan(text):
     return c(text, "96")
 
-
 def green(text):
     return c(text, "92")
-
 
 def yellow(text):
     return c(text, "93")
 
-
 def red(text):
     return c(text, "91")
-
 
 def dim(text):
     return c(text, "2")
 
-
 def reverse(text):
     return c(text, "7")
 
-
 _SCREEN_BUFFER = None
-
 
 def _flush_screen_buffer():
     """Write a full screen redraw in one terminal update.
@@ -257,7 +240,6 @@ def _flush_screen_buffer():
         sys.stdout.write(content)
         sys.stdout.flush()
 
-
 def print(*args, sep=" ", end="\n", file=None, flush=False):
     """Module-local print that buffers screen redraws after clear()."""
     global _SCREEN_BUFFER
@@ -269,12 +251,10 @@ def print(*args, sep=" ", end="\n", file=None, flush=False):
     if flush:
         _flush_screen_buffer()
 
-
 def clear():
     """Start a buffered redraw instead of blanking the terminal immediately."""
     global _SCREEN_BUFFER
     _SCREEN_BUFFER = io.StringIO()
-
 
 def key_display(key):
     names = {
@@ -292,25 +272,22 @@ def key_display(key):
     }
     return names.get(key, str(key).upper() if len(str(key)) == 1 else str(key))
 
-
 def normalize_key_for_compare(key):
     if isinstance(key, str) and len(key) == 1:
         return key.lower()
     return key
 
-
 def hotkey_matches(key, action):
     return normalize_key_for_compare(key) == normalize_key_for_compare(HOTKEYS.get(action, DEFAULT_HOTKEYS[action]))
 
-
 def apply_data_dir(path):
     """Update all user-data folders after loading a custom data_dir."""
-    global DATA_DIR, SESSIONS_DIR, NUMISTA_DIR, EXPORTS_DIR
+    global DATA_DIR, SESSIONS_DIR, NUMISTA_DIR, EXPORTS_DIR, COIN_TYPES_PATH
     DATA_DIR = clean_user_path(path)
     SESSIONS_DIR = os.path.join(DATA_DIR, "coin_sort_sessions")
     NUMISTA_DIR = os.path.join(DATA_DIR, "Numista CSV")
     EXPORTS_DIR = os.path.join(DATA_DIR, "coin_sort_exports")
-
+    COIN_TYPES_PATH = os.path.join(DATA_DIR, "Coin_Types.csv")
 
 def ensure_app_dirs():
     os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -318,7 +295,6 @@ def ensure_app_dirs():
     os.makedirs(SESSIONS_DIR, exist_ok=True)
     os.makedirs(NUMISTA_DIR, exist_ok=True)
     os.makedirs(EXPORTS_DIR, exist_ok=True)
-
 
 def load_settings():
     global HOTKEYS, USE_COLOR, BIG_UI
@@ -346,7 +322,6 @@ def load_settings():
         HOTKEYS = DEFAULT_HOTKEYS.copy()
         ensure_app_dirs()
 
-
 def save_settings():
     ensure_app_dirs()
     data = {
@@ -358,12 +333,10 @@ def save_settings():
     with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-
 def reset_hotkeys_to_default():
     global HOTKEYS
     HOTKEYS = DEFAULT_HOTKEYS.copy()
     save_settings()
-
 
 def read_assignable_key():
     while True:
@@ -372,7 +345,6 @@ def read_assignable_key():
             return None
         # Keep arrows, Tab, Enter, and normal printable keys assignable.
         return key
-
 
 def settings_menu():
     global USE_COLOR, BIG_UI
@@ -467,7 +439,6 @@ def settings_menu():
             save_settings()
             return
 
-
 def read_key():
     _flush_screen_buffer()
     """Cross-platform key reader.
@@ -485,7 +456,6 @@ def read_key():
     if os.name == "nt" and msvcrt is not None:
         return read_key_windows()
     return read_key_unix()
-
 
 def read_key_windows():
     """Read one key on Windows using msvcrt, mapping it to the app constants."""
@@ -512,7 +482,6 @@ def read_key_windows():
     if ch == "\x1b":
         return KEY_ESC
     return ch
-
 
 def read_key_prompt_toolkit():
     """Optional single-key Prompt Toolkit reader kept for future experiments.
@@ -570,7 +539,6 @@ def read_key_prompt_toolkit():
     if isinstance(key, str) and len(key) == 1:
         return key
     return str(key)
-
 
 def read_key_unix():
     """Linux/macOS raw key reader with Tab, arrows, numpad chars, Enter, Backspace."""
@@ -645,25 +613,20 @@ def read_key_unix():
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
-
 def safe_filename(name):
     name = name.strip()
     name = re.sub(r"[^\w\s.-]", "", name)
     name = re.sub(r"\s+", "_", name)
     return name or "coin_sort_session"
 
-
 def ensure_sessions_dir():
     ensure_app_dirs()
-
 
 def ensure_numista_dir():
     ensure_app_dirs()
 
-
 def ensure_exports_dir():
     ensure_app_dirs()
-
 
 def normalize_decimal(value):
     """Normalize values like 0.1, 0.10, 1, 1.00 for matching."""
@@ -671,7 +634,6 @@ def normalize_decimal(value):
         return f"{float(str(value).strip()):.2f}"
     except ValueError:
         return str(value).strip()
-
 
 def normalize_mint(value):
     value = str(value).strip()
@@ -693,7 +655,6 @@ def normalize_mint(value):
         return "W"
     return value
 
-
 def coin_mint_candidates(mint_value):
     mint = normalize_mint(mint_value)
     if mint in ("", "P", "NO MINT"):
@@ -701,12 +662,10 @@ def coin_mint_candidates(mint_value):
         return {"", "P", "NO MINT"}
     return {mint}
 
-
 def make_denom_label(face_value, currency):
     face = normalize_decimal(face_value)
     currency = str(currency).strip()
     return f"{face} {currency}" if currency else face
-
 
 def split_denom_label(label):
     parts = str(label).strip().split(" ", 1)
@@ -714,17 +673,14 @@ def split_denom_label(label):
     currency = parts[1].strip() if len(parts) > 1 else ""
     return face, currency
 
-
 def clean_numista_number(value):
     """Return only the numeric part from values like 'N# 12345'."""
     match = re.search(r"(\d+)", str(value or ""))
     return match.group(1) if match else ""
 
-
 def numista_url(value):
     number = clean_numista_number(value)
     return f"https://en.numista.com/catalogue/pieces{number}.html" if number else ""
-
 
 def terminal_link(text, url):
     """Clickable OSC-8 terminal hyperlink, closed immediately after text.
@@ -742,6 +698,253 @@ def terminal_link(text, url):
     return f"\033]8;;{url}\a{text}\033]8;;\a\033[0m"
 
 
+def ensure_coin_types_csv():
+    """Create Coin_Types.csv if it does not exist yet."""
+    ensure_app_dirs()
+    if not os.path.exists(COIN_TYPES_PATH):
+        with open(COIN_TYPES_PATH, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=COIN_TYPES_HEADERS, extrasaction="ignore")
+            writer.writeheader()
+
+
+def coin_type_cache_key(row):
+    return (
+        str(row.get("country", "")).strip(),
+        normalize_decimal(row.get("face_value", "")),
+        str(row.get("year", "")).strip(),
+        normalize_mint(row.get("mint", "")),
+        clean_numista_number(row.get("numista_number", "")),
+        str(row.get("coin_type", "")).strip(),
+    )
+
+
+def make_coin_type_cache_row(source, country, currency, face_value, denomination, year, mint, coin_type, numista_number, numista_title="", numista_category="", comments="", source_csv=""):
+    return {
+        "source": source,
+        "country": str(country).strip(),
+        "currency": str(currency).strip(),
+        "face_value": normalize_decimal(face_value),
+        "denomination": str(denomination).strip(),
+        "year": str(year).strip(),
+        "mint": normalize_mint(mint),
+        "coin_type": str(coin_type or "Unknown type").strip(),
+        "numista_number": clean_numista_number(numista_number),
+        "numista_title": str(numista_title or coin_type or "Unknown type").strip(),
+        "numista_category": str(numista_category).strip(),
+        "comments": str(comments).strip(),
+        "source_csv": os.path.basename(str(source_csv)) if source_csv else "",
+        "last_seen": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def read_coin_type_cache_rows():
+    ensure_coin_types_csv()
+    rows = []
+    try:
+        with open(COIN_TYPES_PATH, "r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                rows.append({key: row.get(key, "") for key in COIN_TYPES_HEADERS})
+    except Exception:
+        rows = []
+    return rows
+
+
+def write_coin_type_cache_rows(rows):
+    ensure_app_dirs()
+    with open(COIN_TYPES_PATH, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=COIN_TYPES_HEADERS, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in COIN_TYPES_HEADERS})
+
+
+def upsert_coin_type_cache_rows(new_rows):
+    """Insert new type rows without duplicating existing cache entries."""
+    existing_rows = read_coin_type_cache_rows()
+    existing_keys = {coin_type_cache_key(row) for row in existing_rows}
+    changed = False
+
+    for row in new_rows:
+        key = coin_type_cache_key(row)
+        if key in existing_keys:
+            continue
+        existing_rows.append(row)
+        existing_keys.add(key)
+        changed = True
+
+    if changed or not os.path.exists(COIN_TYPES_PATH):
+        write_coin_type_cache_rows(existing_rows)
+    return existing_rows
+
+
+def build_type_index_from_cache(rows):
+    type_index = {}
+    for row in rows:
+        country = str(row.get("country", "")).strip()
+        face_value = normalize_decimal(row.get("face_value", ""))
+        year = str(row.get("year", "")).strip()
+        mint = normalize_mint(row.get("mint", ""))
+        if not country or not face_value or not year:
+            continue
+        option = {
+            "coin_type": row.get("coin_type", "") or row.get("numista_title", "") or "Unknown type",
+            "numista_number": clean_numista_number(row.get("numista_number", "")),
+            "numista_title": row.get("numista_title", "") or row.get("coin_type", "") or "Unknown type",
+            "numista_category": row.get("numista_category", ""),
+            "denomination": row.get("denomination", "") or make_denom_label(face_value, row.get("currency", "")),
+            "country": country,
+            "face_value": face_value,
+            "year": year,
+            "mint": mint,
+            "source": row.get("source", ""),
+            "comments": row.get("comments", ""),
+        }
+        key = (country, face_value, year, mint)
+        bucket = type_index.setdefault(key, [])
+        if not any(existing.get("coin_type") == option["coin_type"] and existing.get("numista_number") == option["numista_number"] for existing in bucket):
+            bucket.append(option)
+
+    for key in type_index:
+        type_index[key].sort(key=lambda option: (option.get("coin_type", "").lower(), clean_numista_number(option.get("numista_number", "")) or "999999999"))
+    return type_index
+
+
+def numista_search_denom_terms(session):
+    """Return cleaner denomination search terms for Numista's catalog search.
+
+    The active denomination label can be something like
+    ``0.01 Dollar (1785-date)``. Numista's search often does better with
+    human terms like ``1 cent`` and without the parenthesized currency era.
+    Keep this conservative: use common US names when obvious, then fall back
+    to a cleaned denomination label and numeric face/currency.
+    """
+    country = str(session.get("country", "")).strip().lower()
+    face = normalize_decimal(session.get("face_value", ""))
+    currency = str(session.get("currency", "")).strip()
+    denom = re.sub(r"\s*\([^)]*\)", "", str(session.get("denomination", "")).strip()).strip()
+
+    if "united states" in country:
+        us_terms = {
+            "0.01": "1 cent",
+            "0.05": "5 cents",
+            "0.10": "10 cents",
+            "0.25": "25 cents",
+            "0.50": "50 cents",
+            "1.00": "1 dollar",
+        }
+        if face in us_terms:
+            return us_terms[face]
+
+    if denom:
+        return denom
+    if face and currency:
+        return f"{face} {currency}"
+    return face
+
+
+def numista_search_url(session, year, mint_name):
+    """Build a broad Numista search URL for finding a missing type.
+
+    Mint marks are intentionally omitted. Searching ``2025 W`` or ``2005 D``
+    can return no results even when the type exists, because Numista catalog
+    search is type-oriented more than mint-row-oriented. The user can still
+    refine the search manually after the browser opens.
+    """
+    parts = [
+        session.get("country", ""),
+        numista_search_denom_terms(session),
+        str(year),
+    ]
+    query = "+".join(re.sub(r"\s+", "+", str(p).strip()) for p in parts if p and str(p).strip())
+    return f"https://en.numista.com/catalogue/index.php?r={query}&ct=coin"
+
+
+def prompt_yes_no(title, detail=""):
+    """Return True for Yes, False for No, or None when cancelled."""
+    choice = choose_from_list(title + (("\n\n" + detail) if detail else ""), ["Yes", "No"])
+    if choice is None:
+        return None
+    return choice == "Yes"
+
+
+def prompt_manual_coin_type(session, year, mint_name, existing_notes=""):
+    """Create a manual Coin_Types.csv entry for an OTHER type and return it.
+
+    BACKSPACE/ESC cancels the manual type flow and returns to editing the
+    current coin instead of trapping the user in the required Numista-number
+    prompt.
+    """
+    should_search = prompt_yes_no(
+        "Coin type is OTHER. Search Numista now?",
+        "Yes opens a Numista search in your browser. Either way, you must enter a type note and Numista number. BACKSPACE/ESC returns to editing."
+    )
+    if should_search is None:
+        return None, None
+
+    if should_search:
+        try:
+            webbrowser.open(numista_search_url(session, year, mint_name))
+        except Exception:
+            pass
+
+    while True:
+        type_note = text_input("Enter the coin type/title notes for this OTHER coin type:", existing_notes)
+        if type_note is None:
+            return None, None
+        if type_note:
+            break
+        clear()
+        print(red("Type notes are required for OTHER coin types."))
+        print("BACKSPACE/ESC from the text prompt returns to editing the coin.")
+        print("Press any key to continue.")
+        read_key()
+
+    while True:
+        numista_number = text_input("Enter the Numista number for this type, numbers only is fine:")
+        if numista_number is None:
+            return None, None
+        clean_number = clean_numista_number(numista_number)
+        if clean_number:
+            break
+        clear()
+        print(red("A Numista number is required for OTHER coin types."))
+        print("Example: enter 10969 or N# 10969")
+        print("BACKSPACE/ESC from the text prompt returns to editing the coin.")
+        print("Press any key to continue.")
+        read_key()
+
+    row = make_coin_type_cache_row(
+        "manual",
+        session.get("country", ""),
+        session.get("currency", ""),
+        session.get("face_value", ""),
+        session.get("denomination", ""),
+        year,
+        mint_name,
+        type_note,
+        clean_number,
+        type_note,
+        "Manual / Numista lookup",
+        type_note,
+        "manual",
+    )
+    all_rows = upsert_coin_type_cache_rows([row])
+    session["numista_type_index"] = build_type_index_from_cache(all_rows)
+    return {
+        "coin_type": row["coin_type"],
+        "numista_number": row["numista_number"],
+        "numista_title": row["numista_title"],
+        "numista_category": row["numista_category"],
+        "denomination": row["denomination"],
+        "country": row["country"],
+        "face_value": row["face_value"],
+        "year": row["year"],
+        "mint": row["mint"],
+        "selected_mint": row["mint"],
+        "match_note": "manual saved to Coin_Types.csv",
+    }, type_note
+
 def load_numista_index():
     """Load owned coins and type choices from every CSV in ./Numista CSV.
 
@@ -757,8 +960,9 @@ def load_numista_index():
       type_index: {(country, face_value, gregorian_year, mintmark): [type option dicts]}
     """
     ensure_numista_dir()
+    ensure_coin_types_csv()
     index = set()
-    type_index = {}
+    cache_rows_to_seed = []
     countries = set()
     denom_map = {}
 
@@ -794,27 +998,11 @@ def load_numista_index():
                     denom_map.setdefault(country, set()).add(denom_label)
 
                     if gregorian_year:
-                        option = {
-                            "coin_type": title or "Unknown type",
-                            "numista_number": numista_number,
-                            "numista_title": title,
-                            "numista_category": numista_category,
-                            "denomination": denom_label,
-                            "country": country,
-                            "face_value": face_value,
-                            "year": gregorian_year,
-                            "mint": mintmark,
-                        }
-                        key = (country, face_value, gregorian_year, mintmark)
-                        bucket = type_index.setdefault(key, [])
-                        # Avoid duplicate options from repeated collection rows.
-                        if not any(
-                            existing.get("coin_type") == option["coin_type"]
-                            and existing.get("numista_number") == option["numista_number"]
-                            and existing.get("mint") == option["mint"]
-                            for existing in bucket
-                        ):
-                            bucket.append(option)
+                        cache_rows_to_seed.append(make_coin_type_cache_row(
+                            "numista_csv", country, currency, face_value, denom_label,
+                            gregorian_year, mintmark, title or "Unknown type",
+                            numista_number, title, numista_category, "", path
+                        ))
 
                     if not gregorian_year:
                         continue
@@ -840,11 +1028,10 @@ def load_numista_index():
         for country, labels in denom_map.items()
     }
 
-    for key in type_index:
-        type_index[key].sort(key=lambda option: (option.get("coin_type", "").lower(), option.get("numista_number", "")))
+    coin_type_rows = upsert_coin_type_cache_rows(cache_rows_to_seed)
+    type_index = build_type_index_from_cache(coin_type_rows)
 
     return index, csv_files, countries, denoms_by_country, type_index
-
 
 def get_detected_type_options(session, year, mint_name):
     """Return Numista type choices for country/value/year.
@@ -953,7 +1140,6 @@ def coin_exists_in_numista(numista_index, session, year, mint_name):
     candidates = coin_mint_candidates(mint_name)
     return any((country, face_value, str(year).strip(), mint) in numista_index for mint in candidates)
 
-
 def choose_country_and_denom(numista_countries, denoms_by_country, current_country=None):
     if not numista_countries:
         clear()
@@ -1052,11 +1238,9 @@ def prompt_missing_numista_coin(session, year, mint_name):
         elif key in (KEY_BACKSPACE, KEY_ESC):
             return False
 
-
 def session_path(session_name):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     return os.path.join(SESSIONS_DIR, f"{timestamp}_{safe_filename(session_name)}.csv")
-
 
 def write_session_csv(path, log):
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -1065,13 +1249,11 @@ def write_session_csv(path, log):
         for row in log:
             writer.writerow(row)
 
-
 def load_session_csv(path):
     if not os.path.exists(path):
         return []
     with open(path, "r", newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
-
 
 def text_input(prompt, default=""):
     value = default
@@ -1092,7 +1274,6 @@ def text_input(prompt, default=""):
             value = value[:-1]
         elif isinstance(key, str) and len(key) == 1 and key.isprintable():
             value += key
-
 
 def choose_from_list(title, options):
     index = 0
@@ -1115,13 +1296,11 @@ def choose_from_list(title, options):
         elif key == KEY_ENTER:
             return options[index]
 
-
 def list_sessions():
     ensure_sessions_dir()
     files = [f for f in os.listdir(SESSIONS_DIR) if f.lower().endswith(".csv")]
     files.sort(key=lambda f: os.path.getmtime(os.path.join(SESSIONS_DIR, f)), reverse=True)
     return files
-
 
 def new_session(numista_countries, denoms_by_country):
     session_name = text_input("Enter new session name:")
@@ -1155,7 +1334,6 @@ def new_session(numista_countries, denoms_by_country):
 
     return {"session_name": session_name, "session_type": session_type, "country": coin_choice["country"], "denomination": coin_choice["denomination"], "currency": coin_choice["currency"], "face_value": coin_choice["face_value"], "path": path, "log": log}
 
-
 def confirm_delete_session(filename, path):
     selection = None
     while True:
@@ -1184,7 +1362,6 @@ def confirm_delete_session(filename, path):
             return selection
         elif key in (KEY_BACKSPACE, KEY_ESC):
             return False
-
 
 def choose_session_file_for_resume():
     """Session picker that can delete the highlighted session with BACKSPACE."""
@@ -1247,9 +1424,6 @@ def choose_session_file_for_resume():
                     print()
                     print("Press any key to continue.")
                     read_key()
-
-
-
 
 def choose_multiple_from_list(title, options, allow_all=True):
     """Numpad-first multi-select menu. Returns selected option strings, or None."""
@@ -1361,7 +1535,6 @@ def read_session_rows(filename):
     except Exception:
         return []
 
-
 def export_menu():
     ensure_sessions_dir()
     ensure_exports_dir()
@@ -1424,18 +1597,14 @@ def export_menu():
     print("Press any key to return.")
     read_key()
 
-
-
 def face_value_float(value):
     try:
         return float(normalize_decimal(value))
     except Exception:
         return 0.0
 
-
 def money(value):
     return f"${value:,.2f}"
-
 
 def denom_bucket_for_row(row):
     face = normalize_decimal(row.get("face_value", ""))
@@ -1470,26 +1639,6 @@ def denom_bucket_for_row(row):
         return "Dollar Coins"
     return "Other / Unknown"
 
-
-def suspicious_year_rows_from_rows(rows):
-    suspicious = []
-    high = current_year()
-    for i, coin in enumerate(rows):
-        year = str(coin.get("year", "")).strip()
-        reason = ""
-        if not year_is_complete(year):
-            reason = "not exactly 4 digits"
-        else:
-            y = int(year)
-            if y < 1600 or y > high:
-                reason = f"outside broad range 1600-{high}"
-        if reason:
-            suspicious.append((i, coin, reason))
-    return suspicious
-
-
-
-
 def parse_coin_timestamp(value):
     """Parse timestamps saved by the sorter. Returns None for blank/bad values."""
     text = str(value or "").strip()
@@ -1505,7 +1654,6 @@ def parse_coin_timestamp(value):
         except ValueError:
             continue
     return None
-
 
 def format_duration(seconds):
     seconds = int(max(0, round(seconds)))
@@ -1523,10 +1671,8 @@ def format_duration(seconds):
         parts.append(f"{secs}s")
     return " ".join(parts)
 
-
 def session_group_key(row):
     return str(row.get("source_file") or row.get("session_name") or "Current Session")
-
 
 def calculate_time_analysis(rows, break_threshold_seconds=300):
     """Estimate active sorting time from saved coin timestamps.
@@ -1589,7 +1735,6 @@ def calculate_time_analysis(rows, break_threshold_seconds=300):
         "coins_per_hour": coins_per_hour,
         "seconds_per_coin": seconds_per_coin,
     }
-
 
 def build_statistics_lines(title, rows, selected_files=None):
     """Build a cleaner, less repetitive statistics report."""
@@ -1773,7 +1918,6 @@ def export_statistics_lines(lines, prefix="coin_sort_statistics"):
         f.write("\n")
     return out_path
 
-
 def show_statistics_page(title, rows, selected_files=None, return_hint="ENTER selects the highlighted action."):
     action_index = 0
     actions = ["Back", "Export report"]
@@ -1861,7 +2005,6 @@ def choose_session_files_for_statistics():
         return None
     return [option_to_file[label] for label in picked_sessions]
 
-
 def home_statistics_menu():
     picked_files = choose_session_files_for_statistics()
     if not picked_files:
@@ -1873,7 +2016,6 @@ def home_statistics_menu():
 
     title = "COMBINED SESSION STATISTICS" if len(picked_files) > 1 else "SESSION STATISTICS"
     show_statistics_page(title, rows, picked_files, "ENTER/BACKSPACE/ESC returns to home menu.")
-
 
 def resume_session(numista_countries, denoms_by_country):
     selected_file = choose_session_file_for_resume()
@@ -1947,7 +2089,6 @@ def session_menu():
         elif choice == "Quit" or choice is None:
             return None
 
-
 def prompt_reject_reason(current_reason=""):
     """Ask why a coin was rejected. Returns a reason string, or None if cancelled."""
     options = list(REJECT_REASONS)
@@ -1964,20 +2105,6 @@ def prompt_reject_reason(current_reason=""):
         return custom.strip() if custom else None
     return choice
 
-
-def coin_type_key(row):
-    """Unique type key for collection set-asides: country + value + year + mint + type."""
-    return (
-        str(row.get("country", "")).strip(),
-        normalize_decimal(row.get("face_value", "")),
-        str(row.get("denomination", "")).strip(),
-        str(row.get("year", "")).strip(),
-        normalize_mint(row.get("mint", "")),
-        str(row.get("coin_type", "")).strip(),
-        str(row.get("numista_number", "")).strip(),
-    )
-
-
 def coin_type_label(row):
     year = str(row.get("year", "")).strip() or "????"
     mint = str(row.get("mint", "")).strip() or "?"
@@ -1987,7 +2114,6 @@ def coin_type_label(row):
     country = str(row.get("country", "")).strip() or "Unknown country"
     number_text = f" | {numista_number}" if numista_number else ""
     return f"{year}-{mint} | {coin_type}{number_text} | {denom} | {country}"
-
 
 def make_coin(session_name, session_type, country, denom, currency, face_value, year, mint_index, coin_type_option, notes, reject, reject_reason, keep_bulk, numista_found="", possible_missing_collection="", new_collection=False):
     return {
@@ -2013,18 +2139,14 @@ def make_coin(session_name, session_type, country, denom, currency, face_value, 
         "new_collection": str(boolish(new_collection) if isinstance(new_collection, str) else bool(new_collection)),
     }
 
-
 def reset_coin():
     return "", 0, 0, "", False, "", False, "year"
-
 
 def boolish(value):
     return str(value).lower() in ["true", "1", "yes"]
 
-
 def current_year():
     return datetime.now().year
-
 
 def get_year_range_for_session(session):
     """Return a practical valid range for the active coin type."""
@@ -2038,10 +2160,8 @@ def get_year_range_for_session(session):
         return 1792, max_year
     return 1600, max_year
 
-
 def year_is_complete(year):
     return len(str(year).strip()) == 4 and str(year).strip().isdigit()
-
 
 def year_warning(session, year):
     if not year:
@@ -2086,7 +2206,6 @@ def plausible_year_for_session(year, session):
         return False
     low, high = get_year_range_for_session(session)
     return low <= year <= high
-
 
 def suggest_year_corrections(year_text, log, session):
     """Suggest likely corrections for typo years like 2220 -> 2020.
@@ -2154,28 +2273,9 @@ def suggest_year_corrections(year_text, log, session):
 
     return sorted(candidates, key=score)[:5]
 
-
-def find_suspicious_year_rows(session):
-    rows = []
-    for i, coin in enumerate(session.get("log", [])):
-        year = str(coin.get("year", "")).strip()
-        reason = ""
-        if not year_is_complete(year):
-            reason = "not exactly 4 digits"
-        else:
-            y = int(year)
-            low, high = get_year_range_for_session(session)
-            if y < low or y > high:
-                reason = f"outside expected range {low}-{high}"
-        if reason:
-            rows.append((i, coin, reason, suggest_year_corrections(year, session.get("log", []), session)))
-    return rows
-
-
 def next_focus(focus, direction=1):
     i = FOCUS_ORDER.index(focus)
     return FOCUS_ORDER[(i + direction) % len(FOCUS_ORDER)]
-
 
 def save_current_coin(session, year, mint_index, coin_type_index, notes, reject, reject_reason, keep_bulk, editing_index, numista_index=None):
     if not (len(year) == 4 and year.isdigit()):
@@ -2183,11 +2283,13 @@ def save_current_coin(session, year, mint_index, coin_type_index, notes, reject,
 
     mint_name = MINTS[mint_index]
     coin_type_option = selected_type_option(session, year, mint_index, coin_type_index)
-    if coin_type_option.get("coin_type") == "OTHER" and not str(notes).strip():
-        other_note = text_input("Type notes for OTHER coin type. This will be saved in Comments/Notes:", notes)
-        if not other_note:
+    if coin_type_option.get("coin_type") == "OTHER":
+        manual_option, other_note = prompt_manual_coin_type(session, year, mint_name, notes)
+        if not manual_option:
             return False, editing_index
-        notes = other_note
+        coin_type_option = manual_option
+        if not str(notes).strip():
+            notes = other_note
 
     numista_found = ""
     possible_missing = ""
@@ -2228,8 +2330,6 @@ def save_current_coin(session, year, mint_index, coin_type_index, notes, reject,
     write_session_csv(session["path"], session["log"])
     return True, editing_index
 
-
-
 def session_counts(log):
     """Return (total_count, today_count) for the active session CSV log."""
     today = datetime.now().date().isoformat()
@@ -2259,9 +2359,11 @@ def draw(session, year, mint_index, coin_type_index, notes, reject, reject_reaso
     print(f"{bold('Country:')} {session.get('country', 'Unknown')}    {bold('Denomination:')} {session['denomination']}")
     print(f"{bold('File:')} {session['path']}")
     if session.get("numista_csv_count", 0):
-        print(f"{bold('Numista CSVs:')} {session.get('numista_csv_count')} loaded from {NUMISTA_DIR} | {session.get('numista_coin_count', 0)} owned US coin entries indexed")
+        type_count = sum(len(bucket) for bucket in (session.get("numista_type_index", {}) or {}).values())
+        print(f"{bold('Numista CSVs:')} {session.get('numista_csv_count')} loaded from {NUMISTA_DIR} | {session.get('numista_coin_count', 0)} owned entries | {type_count} cached type rows")
     else:
         print(yellow(f"Numista CSVs: none loaded from {NUMISTA_DIR}"))
+        print(dim(f"Coin type cache: {COIN_TYPES_PATH}"))
 
     total_sorted, today_sorted = session_counts(log)
     print(f"{bold('Sorted in this CSV:')} {green(str(total_sorted))} total    {bold('Today:')} {green(str(today_sorted))}")
@@ -2363,8 +2465,6 @@ def draw(session, year, mint_index, coin_type_index, notes, reject, reject_reaso
     elif focus == "quit":
         print("ENTER opens Save + Quit confirmation.")
 
-
-
 def change_current_country_denom(session):
     choice = choose_country_and_denom(
         session.get("numista_countries", []),
@@ -2378,7 +2478,6 @@ def change_current_country_denom(session):
     session["currency"] = choice["currency"]
     session["face_value"] = choice["face_value"]
     return True
-
 
 def previous_coins_menu(session, start_index=None):
     """Full saved-coin picker. Returns the selected log index, or None.
@@ -2464,13 +2563,11 @@ def previous_coins_menu(session, start_index=None):
         elif key == KEY_ENTER:
             return index
 
-
 def make_bar(count, max_count, width=30):
     if max_count <= 0:
         return ""
     filled = max(1, int((count / max_count) * width))
     return "█" * filled
-
 
 def coin_year_int(coin):
     year = str(coin.get("year", "")).strip()
@@ -2478,10 +2575,8 @@ def coin_year_int(coin):
         return int(year)
     return None
 
-
 def decade_label(year):
     return f"{(year // 10) * 10}s"
-
 
 def statistics_menu(session):
     """Statistics page for the active session CSV, using the same fields as home statistics."""
@@ -2490,80 +2585,6 @@ def statistics_menu(session):
     for row in rows:
         row.setdefault("source_file", selected_file)
     show_statistics_page("SESSION STATISTICS", rows, [selected_file], "ENTER/BACKSPACE/ESC returns to coin entry.")
-
-
-
-def apply_year_correction(session, row_index, new_year):
-    session["log"][row_index]["year"] = str(new_year)
-    session["log"][row_index]["timestamp"] = datetime.now().isoformat(timespec="seconds")
-    write_session_csv(session["path"], session["log"])
-
-
-def invalid_year_check_menu(session):
-    """Separate safe review page for weird saved years.
-
-    Returns the selected log index to edit, or None to go back.
-    It never auto-changes a year from this page. You must choose an item,
-    press ENTER to load it into the normal editor, then save it there.
-    After the saved year is valid, it naturally disappears from this list.
-    """
-    index = 0
-    while True:
-        suspicious = find_suspicious_year_rows(session)
-        clear()
-        print(c("=" * 110, "91" if suspicious else "92"))
-        print(bold((red if suspicious else green)("INVALID YEAR CHECK".center(110))))
-        print(c("=" * 110, "91" if suspicious else "92"))
-        print()
-        print(f"{bold('Session:')} {session['session_name']}    {bold('CSV:')} {session['path']}")
-        print()
-
-        if not suspicious:
-            print(green(bold("No suspicious saved years found.")))
-            print(dim("This checks for non-4-digit years and dates outside the expected range for the active coin type."))
-            print()
-            print(dim("ENTER/BACKSPACE/ESC returns to coin entry."))
-            key = read_key()
-            if key in (KEY_ENTER, KEY_BACKSPACE, KEY_ESC):
-                return None
-            continue
-
-        index = max(0, min(index, len(suspicious) - 1))
-        print(bold("Controls:"), "TAB/+ next   SHIFT+TAB/- previous   ENTER edit selected   BACKSPACE return")
-        print(dim("This page is review-only. It will not auto-apply a suggested year."))
-        print(dim("Edit the selected coin on the normal entry screen, then save it. Once valid, it leaves this list."))
-        print()
-
-        for pos, (row_index, coin, reason, suggestions) in enumerate(suspicious):
-            year = str(coin.get("year", ""))
-            mint = str(coin.get("mint", ""))
-            suggestion_text = ", ".join(str(x) for x in suggestions[:3]) if suggestions else "no obvious suggestion"
-            line = f"{row_index + 1:>4}. {year}-{mint:<7} | {reason:<28} | suggested: {suggestion_text}"
-            print(reverse(line) if pos == index else line)
-
-        row_index, coin, reason, suggestions = suspicious[index]
-        print()
-        print(c("-" * 110, "91"))
-        print(bold("Selected coin:"), f"#{row_index + 1}  {coin.get('year', '')}-{coin.get('mint', '')}  {coin.get('denomination', '')}")
-        print(bold("Reason:"), red(reason))
-        if suggestions:
-            print(bold("Possible fixes:"), green(", ".join(str(x) for x in suggestions[:5])))
-            print(dim("These are suggestions only. Press ENTER to edit the coin yourself."))
-        else:
-            print(yellow("No automatic correction looked safe. Press ENTER to edit it manually."))
-        print()
-        print(dim("BACKSPACE/ESC returns to coin entry."))
-
-        key = read_key()
-        if key in (KEY_BACKSPACE, KEY_ESC):
-            return None
-        if key in ("+", "=", KEY_TAB, KEY_DOWN):
-            index = (index + 1) % len(suspicious)
-        elif key in ("-", "_", KEY_SHIFT_TAB, KEY_UP):
-            index = (index - 1) % len(suspicious)
-        elif key == KEY_ENTER:
-            return row_index
-
 
 def confirm_save_quit(session):
     while True:
@@ -2662,7 +2683,6 @@ def sorting_loop(session):
             if confirm_save_quit(session):
                 break
             continue
-
 
         # Hotkey-only bin flags. These are never TAB/ENTER selectable.
         if hotkey_matches(key, "reject"):
@@ -2787,7 +2807,6 @@ def sorting_loop(session):
             notes += key
             continue
 
-
 def main():
     load_settings()
     configure_terminal_output()
@@ -2798,7 +2817,6 @@ def main():
             print("Goodbye.")
             return
         sorting_loop(session)
-
 
 if __name__ == "__main__":
     main()
