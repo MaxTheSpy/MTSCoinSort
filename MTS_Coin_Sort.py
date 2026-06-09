@@ -145,6 +145,7 @@ FOCUS_ORDER = ["year", "mint", "coin_type", "save", "notes", "recent", "change_d
 USE_COLOR = True
 BIG_UI = True
 ROLL_QUANTITIES = {}
+CUSTOM_DENOMINATIONS = []
 NUMISTA_CLIENT_ID = ""
 NUMISTA_API_KEY = ""
 ANSI_SUPPORTED = os.name != "nt"
@@ -309,7 +310,7 @@ def ensure_app_dirs():
     os.makedirs(EXPORTS_DIR, exist_ok=True)
 
 def load_settings():
-    global HOTKEYS, USE_COLOR, BIG_UI, ROLL_QUANTITIES, NUMISTA_CLIENT_ID, NUMISTA_API_KEY
+    global HOTKEYS, USE_COLOR, BIG_UI, ROLL_QUANTITIES, CUSTOM_DENOMINATIONS, NUMISTA_CLIENT_ID, NUMISTA_API_KEY
     HOTKEYS = DEFAULT_HOTKEYS.copy()
     if not os.path.exists(SETTINGS_PATH):
         ensure_app_dirs()
@@ -330,6 +331,7 @@ def load_settings():
         USE_COLOR = bool(data.get("use_color", USE_COLOR))
         BIG_UI = bool(data.get("big_ui", BIG_UI))
         ROLL_QUANTITIES = normalize_roll_quantities(data.get("roll_quantities", {}))
+        CUSTOM_DENOMINATIONS = normalize_custom_denominations(data.get("custom_denominations", []))
         numista_api = data.get("numista_api", {}) if isinstance(data.get("numista_api", {}), dict) else {}
         NUMISTA_CLIENT_ID = str(numista_api.get("client_id", "") or "")
         NUMISTA_API_KEY = str(numista_api.get("api_key", "") or "")
@@ -337,6 +339,7 @@ def load_settings():
     except Exception:
         HOTKEYS = DEFAULT_HOTKEYS.copy()
         ROLL_QUANTITIES = {}
+        CUSTOM_DENOMINATIONS = []
         NUMISTA_CLIENT_ID = ""
         NUMISTA_API_KEY = ""
         ensure_app_dirs()
@@ -349,6 +352,7 @@ def save_settings():
         "use_color": USE_COLOR,
         "big_ui": BIG_UI,
         "roll_quantities": ROLL_QUANTITIES,
+        "custom_denominations": CUSTOM_DENOMINATIONS,
         "numista_api": {
             "client_id": NUMISTA_CLIENT_ID,
             "api_key": NUMISTA_API_KEY,
@@ -356,6 +360,192 @@ def save_settings():
     }
     with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
+
+
+def normalize_custom_denominations(value):
+    """Return a clean list of custom country/denomination choices.
+
+    These are for coins found in a session that are not already represented in
+    the user's Numista CSV export yet, such as a Canadian cent found while
+    searching US penny rolls. They are saved in settings.json and merged into
+    the normal country/denomination picker.
+    """
+    cleaned = []
+    seen = set()
+    if not isinstance(value, list):
+        return cleaned
+
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        country = str(item.get("country", "")).strip()
+        face_value = normalize_decimal(item.get("face_value", ""))
+        currency = str(item.get("currency", "")).strip()
+        denomination = str(item.get("denomination", "")).strip() or make_denom_label(face_value, currency)
+        if not country or not face_value:
+            continue
+        key = (country.lower(), face_value, currency.lower(), denomination.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append({
+            "country": country,
+            "currency": currency,
+            "face_value": face_value,
+            "denomination": denomination,
+        })
+    cleaned.sort(key=lambda item: (item["country"].lower(), item["currency"].lower(), face_value_float_for_sort(item["face_value"]), item["denomination"].lower()))
+    return cleaned
+
+
+def face_value_float_for_sort(value):
+    try:
+        return float(normalize_decimal(value))
+    except Exception:
+        return 999999.0
+
+
+def custom_denoms_by_country():
+    mapping = {}
+    for item in CUSTOM_DENOMINATIONS:
+        country = str(item.get("country", "")).strip()
+        label = str(item.get("denomination", "")).strip() or make_denom_label(item.get("face_value", ""), item.get("currency", ""))
+        if country and label:
+            mapping.setdefault(country, set()).add(label)
+    return mapping
+
+
+def find_custom_denom(country, denom_label):
+    for item in CUSTOM_DENOMINATIONS:
+        if str(item.get("country", "")).strip() == str(country).strip() and str(item.get("denomination", "")).strip() == str(denom_label).strip():
+            return {
+                "country": item.get("country", ""),
+                "denomination": item.get("denomination", ""),
+                "currency": item.get("currency", ""),
+                "face_value": normalize_decimal(item.get("face_value", "")),
+            }
+    return None
+
+
+def save_custom_denomination(country, face_value, currency, denomination=""):
+    """Save a custom country/denomination and return a session choice dict."""
+    global CUSTOM_DENOMINATIONS
+    country = str(country or "").strip()
+    face_value = normalize_decimal(face_value)
+    currency = str(currency or "").strip()
+    denomination = str(denomination or "").strip() or make_denom_label(face_value, currency)
+
+    if not country or not face_value:
+        return None
+
+    new_item = {
+        "country": country,
+        "currency": currency,
+        "face_value": face_value,
+        "denomination": denomination,
+    }
+
+    normalized = normalize_custom_denominations(CUSTOM_DENOMINATIONS + [new_item])
+    if normalized != CUSTOM_DENOMINATIONS:
+        CUSTOM_DENOMINATIONS = normalized
+        save_settings()
+
+    return dict(new_item)
+
+
+def remove_custom_denominations_for_country_face(country, face_value):
+    """Remove temporary custom denominations after a Numista API type confirms them.
+
+    A custom denomination is only a placeholder so the user can keep sorting a
+    foreign or unexpected coin in the same session. Once the user enters an N#
+    and the API saves a real Coin_Types.csv row for that country/face value, the
+    placeholder should disappear from future pickers.
+    """
+    global CUSTOM_DENOMINATIONS
+    country_key = str(country or "").strip().lower()
+    face_key = normalize_decimal(face_value)
+    if not country_key or not face_key:
+        return False
+
+    kept = []
+    removed = False
+    for item in CUSTOM_DENOMINATIONS:
+        item_country = str(item.get("country", "")).strip().lower()
+        item_face = normalize_decimal(item.get("face_value", ""))
+        if item_country == country_key and item_face == face_key:
+            removed = True
+            continue
+        kept.append(item)
+
+    if removed:
+        CUSTOM_DENOMINATIONS = normalize_custom_denominations(kept)
+        save_settings()
+    return removed
+
+
+def cache_denoms_by_country():
+    """Return denominations already learned in Coin_Types.csv.
+
+    This lets API-added types backfill the country/denomination picker. For
+    example, after adding a Canadian cent by N#, Canada 0.01 will come from
+    Coin_Types.csv instead of staying as a temporary custom denomination.
+    """
+    mapping = {}
+    try:
+        for row in read_coin_type_cache_rows():
+            country = str(row.get("country", "")).strip()
+            face_value = normalize_decimal(row.get("face_value", ""))
+            currency = normalize_currency_label(str(row.get("currency", "")).strip(), country)
+            denom = str(row.get("denomination", "")).strip()
+            if not denom or denom == face_value:
+                denom = make_denom_label(face_value, currency) if currency else denom
+            if country and face_value and denom:
+                mapping.setdefault(country, set()).add(denom)
+    except Exception:
+        pass
+    return mapping
+
+
+def prompt_custom_country_denom(default_country=""):
+    """Prompt for a new country/denomination when it is missing from Numista CSV."""
+    country = str(default_country or "").strip()
+    if not country:
+        country = text_input("Enter country name for this coin, for example Canada, Mexico, United Kingdom:")
+        if not country:
+            return None
+
+    face_value = text_input(
+        f"Enter face value for {country}. Examples: 0.01, 0.05, 0.25, 1.00:"
+    )
+    if not face_value:
+        return None
+
+    currency = text_input(
+        f"Enter currency/denomination family for {country}. Examples: Dollar, Canadian Dollar, Peso, Euro:"
+    )
+    if currency is None:
+        return None
+
+    default_label = make_denom_label(face_value, currency)
+    denomination = text_input(
+        "Enter display label for the picker, or press ENTER to use this default:",
+        default_label,
+    )
+    if denomination is None:
+        return None
+    denomination = denomination or default_label
+
+    choice = save_custom_denomination(country, face_value, currency, denomination)
+    if choice:
+        clear()
+        print(green("Custom country/denomination saved."))
+        print()
+        print(f"Now available: {choice['country']} | {choice['denomination']}")
+        print()
+        print(dim("If no type is listed for the coin, choose OTHER, enter the Numista N#, and the API will populate Coin_Types.csv."))
+        print("Press any key to continue.")
+        read_key()
+    return choice
 
 
 def normalize_roll_quantities(value):
@@ -545,7 +735,238 @@ def numista_detail_value_text(details):
 
 def numista_detail_currency_text(details):
     currency = details.get("currency", {}) if isinstance(details.get("currency", {}), dict) else {}
-    return str(currency.get("full_name", "") or currency.get("name", "") or "").strip()
+    text = str(
+        currency.get("full_name", "")
+        or currency.get("name", "")
+        or currency.get("display_name", "")
+        or currency.get("title", "")
+        or ""
+    ).strip()
+    return text
+
+
+def currency_from_country_fallback(country):
+    """Return a useful currency label when Numista omits currency text.
+
+    Some API type responses provide a value like ``1 Cent`` but not a
+    convenient currency string for building the local denomination picker.
+    This fallback keeps the picker from creating bare labels such as ``0.01``.
+    """
+    key = re.sub(r"\s+", " ", str(country or "").strip().lower())
+    defaults = {
+        "canada": "Canadian Dollar",
+        "united states": "Dollar (1785-date)",
+        "mexico": "Peso",
+        "united kingdom": "Pound sterling",
+        "great britain": "Pound sterling",
+        "australia": "Australian Dollar",
+        "new zealand": "New Zealand Dollar",
+    }
+    return defaults.get(key, "")
+
+
+def normalize_currency_label(currency, country=""):
+    """Clean/repair currency text for picker labels."""
+    currency = str(currency or "").strip()
+    country = str(country or "").strip()
+    if not currency:
+        return currency_from_country_fallback(country)
+    if "(" in currency and ")" in currency:
+        return currency
+    low_currency = currency.lower()
+    low_country = country.lower()
+    if low_currency == "dollar":
+        if "canada" in low_country:
+            return "Canadian Dollar"
+        if "australia" in low_country:
+            return "Australian Dollar"
+        if "new zealand" in low_country:
+            return "New Zealand Dollar"
+        if "united states" in low_country:
+            return "Dollar (1785-date)"
+    return currency
+
+
+def denomination_label_from_api(details, face_value, currency):
+    """Build the picker label from API data without bare numeric placeholders."""
+    country = numista_detail_country(details)
+    currency = normalize_currency_label(currency, country)
+    face_value = normalize_decimal(face_value) if face_value else ""
+    value_text = numista_detail_value_text(details)
+    if face_value and currency:
+        return make_denom_label(face_value, currency)
+    if value_text and currency:
+        return f"{value_text} {currency}".strip()
+    if value_text:
+        return value_text
+    if face_value:
+        fallback_currency = normalize_currency_label("", country)
+        return make_denom_label(face_value, fallback_currency) if fallback_currency else face_value
+    return currency
+
+
+def numista_value_to_face_value(details):
+    """Best-effort face-value parser from a Numista API type response.
+
+    The API often returns a display value like ``1 Cent`` or ``25 Cents``.
+    This turns common decimal-currency cent values into the normalized numeric
+    face value used by the sorter, such as 0.01 or 0.25.
+    """
+    value = details.get("value", {}) if isinstance(details.get("value", {}), dict) else {}
+
+    for key in ("numeric_value", "decimal_value", "face_value", "value", "number"):
+        raw = value.get(key)
+        if raw not in (None, ""):
+            try:
+                return normalize_decimal(raw)
+            except Exception:
+                pass
+
+    text = str(value.get("text", "") or details.get("value", "") or "").strip()
+    lowered = text.lower()
+
+    frac_map = {"½": 0.5, "1/2": 0.5, "¼": 0.25, "1/4": 0.25}
+    amount = None
+    for token, number in frac_map.items():
+        if token in lowered:
+            amount = number
+            break
+    if amount is None:
+        match = re.search(r"(\d+(?:\.\d+)?)", lowered)
+        if match:
+            try:
+                amount = float(match.group(1))
+            except Exception:
+                amount = None
+
+    if amount is None:
+        return ""
+
+    # Decimal currencies: cents/pence/sen/etc. are hundredths of the main unit.
+    if any(word in lowered for word in ("cent", "cents", "centime", "centimes", "penny", "pence", "sen")):
+        return normalize_decimal(amount / 100.0)
+
+    return normalize_decimal(amount)
+
+
+def numista_choice_from_details(details):
+    """Create a country/denomination session choice from API details."""
+    country = numista_detail_country(details)
+    currency = normalize_currency_label(numista_detail_currency_text(details), country)
+    face_value = numista_value_to_face_value(details)
+    denomination = denomination_label_from_api(details, face_value, currency)
+    if not country or not face_value:
+        return None
+    return {
+        "country": country,
+        "currency": currency,
+        "face_value": normalize_decimal(face_value),
+        "denomination": denomination,
+    }
+
+
+def make_coin_type_cache_row_from_numista_choice(choice, details, year="", mint_name=""):
+    """Save a Numista API type as a denomination/type seed before coin entry.
+
+    This is used when the user finds a foreign/unexpected coin and chooses
+    ``Add from Numista N#`` before typing the year and mint. It avoids temporary
+    placeholder countries or currencies by pulling the real country, value,
+    currency, title, and year range directly from Numista.
+    """
+    session_stub = dict(choice or {})
+    min_year = str(details.get("min_year", "") or "").strip()
+    seed_year = str(year or min_year or "").strip()
+    return make_coin_type_cache_row_from_numista_api(session_stub, seed_year, mint_name, details)
+
+
+def prompt_numista_country_denom_from_api(default_country=""):
+    """Prompt for an N#, call the API, confirm, save type, and return choice.
+
+    This replaces the older temporary custom-denomination workflow for coins
+    such as Canadian cents found in a US roll. The user enters the N# first,
+    the API supplies the country/denomination, then the user continues entering
+    year/mint normally in the same session.
+    """
+    if not numista_api_configured():
+        clear()
+        print(red("Numista API key is not set."))
+        print()
+        print("Go to Settings > Numista API settings and save your API key first.")
+        print("Press any key to return.")
+        read_key()
+        return None
+
+    while True:
+        prompt = (
+            "Enter the Numista N# for the coin type you want to add. Example: 457 or N#457:\n\n"
+            "IMPORTANT: Pressing ENTER here will call the Numista API using your saved API key.\n"
+            "The API result will provide the country, denomination/value, title, and year range.\n"
+            "You will verify the result before anything is saved. ESC cancels."
+        )
+        if default_country:
+            prompt += f"\n\nExpected country, if known: {default_country}"
+        entered = text_input(prompt)
+        if entered is None:
+            return None
+        clean_number = clean_numista_number(entered)
+        if not clean_number:
+            clear()
+            print(red("A Numista number is required."))
+            print("Example: enter 457 or N#457")
+            print("Press any key to continue.")
+            read_key()
+            continue
+
+        details, error = numista_fetch_type_details(clean_number)
+        if error:
+            clear()
+            print(red("Could not fetch that Numista type."))
+            print()
+            print(error)
+            print()
+            retry = prompt_yes_no("Try another N#?", "Choose No to return without changing country/denomination.")
+            if retry:
+                continue
+            return None
+
+        choice = numista_choice_from_details(details)
+        if not choice:
+            clear()
+            print(red("The API result did not include enough value/country data to create a denomination."))
+            print()
+            print("You can try another N#, or add the coin later using an existing country/denomination.")
+            print()
+            retry = prompt_yes_no("Try another N#?", "Choose No to return without changing country/denomination.")
+            if retry:
+                continue
+            return None
+
+        confirmed = confirm_numista_type_details(details)
+        if confirmed is None:
+            return None
+        if not confirmed:
+            retry = prompt_yes_no("Try another N#?", "Choose No to return without changing country/denomination.")
+            if retry:
+                continue
+            return None
+
+        row = make_coin_type_cache_row_from_numista_choice(choice, details)
+        all_rows = upsert_coin_type_cache_rows([row])
+        remove_custom_denominations_for_country_face(choice.get("country", ""), choice.get("face_value", ""))
+
+        clear()
+        print(green("Numista type saved and country/denomination selected."))
+        print()
+        print(f"Now sorting: {cyan(choice['country'])} | {cyan(choice['denomination'])}")
+        print(f"Saved type: N# {row.get('numista_number', '')} - {row.get('numista_title', '')}")
+        print()
+        print(dim("Next, type the coin year and mint. The type should now appear automatically when the year falls in the Numista range."))
+        print("Press any key to continue.")
+        read_key()
+
+        # Store a fresh index for callers that want to update the active session.
+        choice["_numista_type_index"] = build_type_index_from_cache(all_rows)
+        return choice
 
 
 def numista_detail_country(details):
@@ -653,8 +1074,8 @@ def make_coin_type_cache_row_from_numista_api(session, year, mint_name, details)
     short_type = coin_type_from_numista_title(title)
     category = numista_detail_category(details)
     value_text = numista_detail_value_text(details)
-    currency_text = numista_detail_currency_text(details)
     api_country = numista_detail_country(details)
+    currency_text = normalize_currency_label(numista_detail_currency_text(details), api_country or session.get("country", ""))
     min_year = str(details.get("min_year", "") or "").strip()
     max_year = str(details.get("max_year", "") or "").strip()
     if not min_year:
@@ -678,12 +1099,17 @@ def make_coin_type_cache_row_from_numista_api(session, year, mint_name, details)
     if years:
         comments.append(f"API years: {years}")
 
+    row_country = api_country or session.get("country", "")
+    row_currency = normalize_currency_label(currency_text or session.get("currency", ""), row_country)
+    row_face_value = session.get("face_value", "")
+    row_denomination = denomination_label_from_api(details, row_face_value, row_currency) if row_face_value else (value_text or session.get("denomination", ""))
+
     return make_coin_type_cache_row(
         "numista_api",
-        session.get("country", "") or api_country,
-        session.get("currency", "") or currency_text,
-        session.get("face_value", ""),
-        session.get("denomination", "") or value_text,
+        row_country,
+        row_currency,
+        row_face_value,
+        row_denomination,
         str(year).strip(),
         mint_name,
         short_type,
@@ -1334,6 +1760,11 @@ def write_coin_type_cache_rows(rows):
             clean_row["max_year"] = max_year
             if not clean_row.get("year_range"):
                 clean_row["year_range"] = year_range_label(min_year, max_year, clean_row.get("year", ""))
+            repaired_currency = normalize_currency_label(clean_row.get("currency", ""), clean_row.get("country", ""))
+            repaired_face = normalize_decimal(clean_row.get("face_value", ""))
+            if repaired_currency and (not clean_row.get("currency") or str(clean_row.get("denomination", "")).strip() == repaired_face):
+                clean_row["currency"] = repaired_currency
+                clean_row["denomination"] = make_denom_label(repaired_face, repaired_currency)
             writer.writerow(clean_row)
 
 
@@ -1358,6 +1789,17 @@ def upsert_coin_type_cache_rows(new_rows):
             if not str(existing.get(field, "")).strip() and str(row.get(field, "")).strip():
                 existing[field] = row.get(field, "")
                 changed = True
+
+        # Repair older API-created rows that had a bare denomination like
+        # ``0.01`` because the previous parser did not derive Canadian Dollar,
+        # Australian Dollar, etc. from the API/country.
+        existing_face = normalize_decimal(existing.get("face_value", ""))
+        new_currency = normalize_currency_label(row.get("currency", ""), row.get("country", "") or existing.get("country", ""))
+        existing_denom = str(existing.get("denomination", "")).strip()
+        if new_currency and existing_face and (not existing.get("currency") or existing_denom == existing_face):
+            existing["currency"] = new_currency
+            existing["denomination"] = make_denom_label(existing_face, new_currency)
+            changed = True
 
     if changed or not os.path.exists(COIN_TYPES_PATH):
         write_coin_type_cache_rows(existing_rows)
@@ -1573,6 +2015,14 @@ def prompt_manual_coin_type(session, year, mint_name, existing_notes=""):
         all_rows = upsert_coin_type_cache_rows([row])
         session["numista_type_index"] = build_type_index_from_cache(all_rows)
 
+        # If this coin started from a temporary custom denomination, replace it
+        # with the confirmed API-backed denomination from Coin_Types.csv.
+        remove_custom_denominations_for_country_face(row.get("country", ""), row.get("face_value", ""))
+        session["country"] = row.get("country", session.get("country", ""))
+        session["currency"] = row.get("currency", session.get("currency", ""))
+        session["face_value"] = row.get("face_value", session.get("face_value", ""))
+        session["denomination"] = row.get("denomination", session.get("denomination", ""))
+
         return {
             "coin_type": row["coin_type"],
             "numista_number": row["numista_number"],
@@ -1694,9 +2144,27 @@ def load_numista_index():
         except Exception:
             continue
 
+    # Merge API/cache denominations from Coin_Types.csv so N#-added types
+    # backfill the picker even when the user has no Numista export rows for
+    # that country yet.
+    for cache_country, labels in cache_denoms_by_country().items():
+        if cache_country:
+            countries.add(cache_country)
+            denom_map.setdefault(cache_country, set()).update(labels)
+
+    # Merge custom denominations saved in settings.json so they appear in the
+    # same picker as Numista CSV denominations until an API-backed row replaces
+    # them.
+    for item in CUSTOM_DENOMINATIONS:
+        custom_country = str(item.get("country", "")).strip()
+        custom_label = str(item.get("denomination", "")).strip() or make_denom_label(item.get("face_value", ""), item.get("currency", ""))
+        if custom_country and custom_label:
+            countries.add(custom_country)
+            denom_map.setdefault(custom_country, set()).add(custom_label)
+
     countries = sorted(countries)
     denoms_by_country = {
-        country: sorted(labels, key=lambda label: (split_denom_label(label)[1].lower(), float(split_denom_label(label)[0]) if split_denom_label(label)[0].replace('.', '', 1).isdigit() else 999999, split_denom_label(label)[0]))
+        country: sorted(labels, key=lambda label: (split_denom_label(label)[1].lower(), face_value_float_for_sort(split_denom_label(label)[0]), split_denom_label(label)[0]))
         for country, labels in denom_map.items()
     }
 
@@ -1840,35 +2308,88 @@ def coin_exists_in_numista(numista_index, session, year, mint_name):
     return any((country, face_value, str(year).strip(), mint) in numista_index for mint in candidates)
 
 def choose_country_and_denom(numista_countries, denoms_by_country, current_country=None):
-    if not numista_countries:
-        clear()
-        print(yellow(f"No Numista CSV rows were found in {NUMISTA_DIR}."))
-        print("Add one or more Numista export CSV files, then restart.")
-        print("Press any key to continue.")
-        read_key()
-        return None
+    """Choose or add a country/denomination for the active sorting session.
 
-    country_options = list(numista_countries)
+    The picker combines denominations from Numista CSV exports with custom
+    denominations saved in settings.json. This lets a user stay in the same
+    session when a foreign coin appears in a roll, even if that country or
+    denomination does not exist in their Numista export yet.
+    """
+    numista_countries = list(numista_countries or [])
+    denoms_by_country = denoms_by_country or {}
+    custom_map = custom_denoms_by_country()
+    cache_map = cache_denoms_by_country()
+
+    country_set = set(numista_countries)
+    country_set.update(cache_map.keys())
+    country_set.update(custom_map.keys())
+    country_options = sorted(country_set, key=lambda value: value.lower())
+
     if current_country in country_options:
-        # Put the current country at the top without losing the full list.
         country_options.remove(current_country)
         country_options.insert(0, current_country)
 
-    country = choose_from_list("Select country from Numista CSV:", country_options)
+    add_country_option = "Add country / denomination from Numista N#"
+    manual_country_option = "Add custom country / denomination manually"
+    country_options.append(add_country_option)
+    country_options.append(manual_country_option)
+
+    country = choose_from_list(
+        "Select country for this coin:\n\n"
+        "Numista CSV countries and learned API countries are shown together.\n"
+        "If the country/denomination is missing, choose Add country / denomination from Numista N#.",
+        country_options,
+    )
     if not country:
         return None
 
-    denom_options = denoms_by_country.get(country, [])
+    if country == add_country_option:
+        return prompt_numista_country_denom_from_api()
+    if country == manual_country_option:
+        return prompt_custom_country_denom()
+
+    denom_set = set(denoms_by_country.get(country, []))
+    denom_set.update(cache_map.get(country, set()))
+    denom_set.update(custom_map.get(country, set()))
+    denom_options = sorted(
+        denom_set,
+        key=lambda label: (
+            split_denom_label(label)[1].lower(),
+            face_value_float_for_sort(split_denom_label(label)[0]),
+            split_denom_label(label)[0],
+        )
+    )
+
+    add_denom_option = f"Add denomination from Numista N# for {country}"
+    manual_denom_option = f"Add custom denomination manually for {country}"
+
     if not denom_options:
-        clear()
-        print(yellow(f"No denominations found for {country}."))
-        print("Press any key to return.")
-        read_key()
+        add_now = prompt_yes_no(
+            f"No denominations found for {country}.",
+            "Add one from a Numista N# now?\n\n"
+            "This calls the Numista API, pulls the real country/value/currency, "
+            "and saves the type to Coin_Types.csv before you enter year/mint."
+        )
+        if add_now:
+            return prompt_numista_country_denom_from_api(country)
         return None
 
-    denom_label = choose_from_list(f"Select denomination for {country}:", denom_options)
+    denom_label = choose_from_list(
+        f"Select denomination for {country}:\n\n"
+        "If this denomination is missing, choose Add denomination from Numista N#.",
+        denom_options + [add_denom_option, manual_denom_option],
+    )
     if not denom_label:
         return None
+
+    if denom_label == add_denom_option:
+        return prompt_numista_country_denom_from_api(country)
+    if denom_label == manual_denom_option:
+        return prompt_custom_country_denom(country)
+
+    custom_choice = find_custom_denom(country, denom_label)
+    if custom_choice:
+        return custom_choice
 
     face_value, currency = split_denom_label(denom_label)
     return {
@@ -3367,7 +3888,7 @@ def draw(session, year, mint_index, coin_type_index, notes, reject, reject_reaso
     print(f"{bold('  Keep/Bulk')}  {keep_value}      {dim('hotkey only: *')}")
     print()
     print(f"{(reverse(' Recent/Edit ') if focus == 'recent' else bold(' Recent/Edit '))} {dim('ENTER opens full previous-coin edit list')}")
-    print(f"{(reverse(' Change Country/Denom ') if focus == 'change_denom' else bold(' Change Country/Denom '))} {dim('ENTER changes active sorting selection')}")
+    print(f"{(reverse(' Change Country/Denom ') if focus == 'change_denom' else bold(' Change Country/Denom '))} {dim('ENTER changes/adds active sorting selection')}")
     print(f"{(reverse(' Edit Session Notes ') if focus == 'session_notes' else bold(' Edit Session Notes '))} {dim('ENTER edits title-level notes for this session')}")
     if session.get("session_type") == "Coin roll hunt" and session.get("roll_mode") == "manual":
         print(f"{(reverse(' Next Roll ') if focus == 'next_roll' else bold(' Next Roll '))} {dim('ENTER starts the next roll manually')}")
@@ -3411,7 +3932,7 @@ def draw(session, year, mint_index, coin_type_index, notes, reject, reject_reaso
     elif focus == "recent":
         print("Press ENTER to open the full previous-coin edit list. TAB only moves selection.")
     elif focus == "change_denom":
-        print("Press ENTER to choose a different country and denomination from your Numista CSV.")
+        print("Press ENTER to choose a country/denomination, or add one from a Numista N# without placeholders.")
     elif focus == "session_notes":
         print("Press ENTER to edit session-level notes, such as cool finds, where coins came from, or what you paid.")
     elif focus == "next_roll":
@@ -3436,6 +3957,19 @@ def change_current_country_denom(session):
     session["denomination"] = choice["denomination"]
     session["currency"] = choice["currency"]
     session["face_value"] = choice["face_value"]
+    if choice.get("_numista_type_index"):
+        session["numista_type_index"] = choice["_numista_type_index"]
+        # Refresh picker data so the API-added denomination appears later without restart.
+        try:
+            numista_index, numista_files, numista_countries, denoms_by_country, numista_type_index = load_numista_index()
+            session["numista_index"] = numista_index
+            session["numista_csv_count"] = len(numista_files)
+            session["numista_coin_count"] = len(numista_index)
+            session["numista_countries"] = numista_countries
+            session["denoms_by_country"] = denoms_by_country
+            session["numista_type_index"] = numista_type_index
+        except Exception:
+            pass
     return True
 
 def previous_coins_menu(session, start_index=None):
