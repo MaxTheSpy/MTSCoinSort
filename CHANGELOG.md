@@ -1,6 +1,9 @@
 # Changelog
 A list of ongoing changes per version release. 
 
+## V0.1.3
+- Added numista API support for searching numista number which will then populate `Coin_Types.csv`
+
 ## V0.1.2
 - Removed `Collection Sorting` and `Collection Audit` session types.
 - `Coin Roll Hunt` session type now confirms whether or not you want to start CRH.

@@ -108,10 +108,13 @@ CSV_HEADERS = [
 ]
 
 COIN_TYPES_HEADERS = [
-    "source", "country", "currency", "face_value", "denomination", "year", "mint",
+    "source", "country", "currency", "face_value", "denomination",
+    "year", "min_year", "max_year", "mint",
     "coin_type", "numista_number", "numista_title", "numista_category",
+    "year_range", "composition", "weight", "diameter", "thickness", "orientation",
     "comments", "source_csv", "last_seen"
 ]
+
 
 REJECT_REASONS = [
     "Already Have Enough",
@@ -584,17 +587,86 @@ def preview_numista_type_details(details):
     if isinstance(composition, dict) and composition.get("text"):
         print(f"Composition : {composition.get('text')}")
     print()
-    print(dim("This will be saved to Coin_Types.csv for the current year/mint/denomination if confirmed."))
+    print(dim("This will be saved to Coin_Types.csv. If the API provides a year range, all years in that range will match."))
+
+
+def confirm_numista_type_details(details):
+    """Show the fetched Numista type and require the user to confirm saving it."""
+    selection = None
+
+    def mark(text, active):
+        return reverse(text) if active else dim(text)
+
+    while True:
+        clear()
+        print(c("=" * 100, "94"))
+        print(bold(cyan("VERIFY NUMISTA API RESULT".center(100))))
+        print(c("=" * 100, "94"))
+        print()
+        print(yellow("The N# you typed was looked up with the Numista API."))
+        print(bold("Verify this is the correct coin type before saving."))
+        print()
+        print(f"N#          : {cyan(str(details.get('id', '')))}")
+        print(f"Title       : {bold(details.get('title', 'Unknown'))}")
+        print(f"Country     : {numista_detail_country(details) or 'Unknown'}")
+        print(f"Years       : {numista_detail_years(details)}")
+        print(f"Value       : {numista_detail_value_text(details) or 'Unknown'}")
+        print(f"Currency    : {numista_detail_currency_text(details) or 'Unknown'}")
+        print(f"Category    : {numista_detail_category(details) or 'Unknown'}")
+        composition = details.get("composition", {})
+        if isinstance(composition, dict) and composition.get("text"):
+            print(f"Composition : {composition.get('text')}")
+        if details.get("weight"):
+            print(f"Weight      : {details.get('weight')} g")
+        if details.get("size"):
+            print(f"Diameter    : {details.get('size')} mm")
+        print()
+        print(dim("If saved, this type is added to Coin_Types.csv. If Numista gives a year range, every year in that range will match automatically."))
+        print()
+        print("   +  " + mark(green("  YES — save this type  "), selection is True))
+        print("   -  " + mark(red("  NO — do not save this type  "), selection is False))
+        print()
+        if selection is None:
+            print(bold(yellow("No option selected yet.")))
+        elif selection is True:
+            print(green("Selected: YES — save this Numista type."))
+        else:
+            print(red("Selected: NO — do not save this type."))
+        print()
+        print(dim("Use + or - to choose. ENTER confirms. BACKSPACE/ESC cancels."))
+
+        key = read_key()
+        if key in ("+", "=", KEY_DOWN, KEY_RIGHT):
+            selection = True
+        elif key in ("-", "_", KEY_UP, KEY_LEFT):
+            selection = False
+        elif key == KEY_ENTER and selection is not None:
+            return selection
+        elif key in (KEY_BACKSPACE, KEY_ESC):
+            return None
 
 
 def make_coin_type_cache_row_from_numista_api(session, year, mint_name, details):
-    """Convert one Numista /types/{id} response into this app's Coin_Types.csv row."""
+    """Convert one Numista /types/{id} response into a range-aware cache row."""
     numista_number = clean_numista_number(details.get("id", ""))
     title = str(details.get("title", "") or "Unknown type").strip()
+    short_type = coin_type_from_numista_title(title)
     category = numista_detail_category(details)
     value_text = numista_detail_value_text(details)
     currency_text = numista_detail_currency_text(details)
     api_country = numista_detail_country(details)
+    min_year = str(details.get("min_year", "") or "").strip()
+    max_year = str(details.get("max_year", "") or "").strip()
+    if not min_year:
+        min_year = str(year or "").strip()
+    if not max_year:
+        max_year = min_year
+    years = year_range_label(min_year, max_year, numista_detail_years(details))
+
+    composition = ""
+    comp_obj = details.get("composition", {})
+    if isinstance(comp_obj, dict):
+        composition = str(comp_obj.get("text", "") or "").strip()
 
     comments = []
     if api_country:
@@ -603,8 +675,7 @@ def make_coin_type_cache_row_from_numista_api(session, year, mint_name, details)
         comments.append(f"API value: {value_text}")
     if currency_text:
         comments.append(f"API currency: {currency_text}")
-    years = numista_detail_years(details)
-    if years != "Unknown":
+    if years:
         comments.append(f"API years: {years}")
 
     return make_coin_type_cache_row(
@@ -613,14 +684,22 @@ def make_coin_type_cache_row_from_numista_api(session, year, mint_name, details)
         session.get("currency", "") or currency_text,
         session.get("face_value", ""),
         session.get("denomination", "") or value_text,
-        year,
+        str(year).strip(),
         mint_name,
-        title,
+        short_type,
         numista_number,
         title,
         category,
         "; ".join(comments),
         "numista_api",
+        min_year=min_year,
+        max_year=max_year,
+        year_range=years,
+        composition=composition,
+        weight=details.get("weight", "") or "",
+        diameter=details.get("size", "") or "",
+        thickness=details.get("thickness", "") or "",
+        orientation=details.get("orientation", "") or "",
     )
 
 
@@ -1106,35 +1185,121 @@ def ensure_coin_types_csv():
             writer.writeheader()
 
 
+def safe_int(value, default=None):
+    """Return int(value) when possible, otherwise default."""
+    try:
+        text = str(value).strip()
+        if not text:
+            return default
+        return int(float(text))
+    except Exception:
+        return default
+
+
+def normalized_year_bounds(row):
+    """Return (min_year, max_year) for exact-year and range cache rows."""
+    year = str(row.get("year", "")).strip()
+    min_year = str(row.get("min_year", "")).strip()
+    max_year = str(row.get("max_year", "")).strip()
+
+    if not min_year and year:
+        min_year = year
+    if not max_year and min_year:
+        max_year = min_year
+    if not min_year and max_year:
+        min_year = max_year
+    return min_year, max_year
+
+
+def year_range_label(min_year, max_year, fallback=""):
+    min_year = str(min_year or "").strip()
+    max_year = str(max_year or "").strip()
+    if min_year and max_year:
+        return min_year if min_year == max_year else f"{min_year}-{max_year}"
+    return str(fallback or "").strip()
+
+
 def coin_type_cache_key(row):
+    min_year, max_year = normalized_year_bounds(row)
+    # API/manual range rows should de-dupe by range + Numista number, not by
+    # whichever year the user happened to be sorting when they added the type.
+    source = str(row.get("source", "")).strip()
+    year_key = str(row.get("year", "")).strip()
+    if source in ("numista_api", "manual_api") and min_year and max_year:
+        year_key = ""
+
     return (
         str(row.get("country", "")).strip(),
         normalize_decimal(row.get("face_value", "")),
-        str(row.get("year", "")).strip(),
+        year_key,
+        str(min_year),
+        str(max_year),
         normalize_mint(row.get("mint", "")),
         clean_numista_number(row.get("numista_number", "")),
         str(row.get("coin_type", "")).strip(),
     )
 
 
-def make_coin_type_cache_row(source, country, currency, face_value, denomination, year, mint, coin_type, numista_number, numista_title="", numista_category="", comments="", source_csv=""):
+def coin_type_from_numista_title(title):
+    """Return a short grouping name from a Numista title.
+
+    Examples:
+      1 Cent "Lincoln Cent" (Gold Omega Cent) -> Lincoln Cent
+      1 Cent "Liberty Head" -> Liberty Head
+      1 Dollar (American Innovation - Illinois) -> American Innovation - Illinois
+    """
+    title = str(title or "").strip()
+    quoted = re.search(r'"([^"]+)"', title)
+    if quoted:
+        return quoted.group(1).strip()
+    paren = re.search(r"\(([^()]+)\)", title)
+    if paren:
+        return paren.group(1).strip()
+    if " - " in title:
+        return title.split(" - ", 1)[1].strip()
+    return title or "Unknown type"
+
+
+def make_coin_type_cache_row(
+    source, country, currency, face_value, denomination, year, mint,
+    coin_type, numista_number, numista_title="", numista_category="",
+    comments="", source_csv="", min_year="", max_year="", year_range="",
+    composition="", weight="", diameter="", thickness="", orientation=""
+):
+    year_text = str(year).strip()
+    min_year = str(min_year).strip() if min_year is not None else ""
+    max_year = str(max_year).strip() if max_year is not None else ""
+    if not min_year and year_text:
+        min_year = year_text
+    if not max_year and min_year:
+        max_year = min_year
+    if not year_range:
+        year_range = year_range_label(min_year, max_year, year_text)
+
     return {
         "source": source,
         "country": str(country).strip(),
         "currency": str(currency).strip(),
         "face_value": normalize_decimal(face_value),
         "denomination": str(denomination).strip(),
-        "year": str(year).strip(),
+        "year": year_text,
+        "min_year": str(min_year).strip(),
+        "max_year": str(max_year).strip(),
         "mint": normalize_mint(mint),
         "coin_type": str(coin_type or "Unknown type").strip(),
         "numista_number": clean_numista_number(numista_number),
         "numista_title": str(numista_title or coin_type or "Unknown type").strip(),
         "numista_category": str(numista_category).strip(),
+        "year_range": str(year_range or "").strip(),
+        "composition": str(composition or "").strip(),
+        "weight": str(weight or "").strip(),
+        "diameter": str(diameter or "").strip(),
+        "thickness": str(thickness or "").strip(),
+        "orientation": str(orientation or "").strip(),
         "comments": str(comments).strip(),
         "source_csv": os.path.basename(str(source_csv)) if source_csv else "",
         "last_seen": datetime.now().isoformat(timespec="seconds"),
     }
-
 
 def read_coin_type_cache_rows():
     ensure_coin_types_csv()
@@ -1143,7 +1308,15 @@ def read_coin_type_cache_rows():
         with open(COIN_TYPES_PATH, "r", newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                rows.append({key: row.get(key, "") for key in COIN_TYPES_HEADERS})
+                normalized = {key: row.get(key, "") for key in COIN_TYPES_HEADERS}
+                # Migrate older Coin_Types.csv rows in memory. The next write will
+                # persist the expanded headers safely.
+                min_year, max_year = normalized_year_bounds(normalized)
+                normalized["min_year"] = min_year
+                normalized["max_year"] = max_year
+                if not normalized.get("year_range"):
+                    normalized["year_range"] = year_range_label(min_year, max_year, normalized.get("year", ""))
+                rows.append(normalized)
     except Exception:
         rows = []
     return rows
@@ -1155,57 +1328,116 @@ def write_coin_type_cache_rows(rows):
         writer = csv.DictWriter(f, fieldnames=COIN_TYPES_HEADERS, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
-            writer.writerow({key: row.get(key, "") for key in COIN_TYPES_HEADERS})
+            min_year, max_year = normalized_year_bounds(row)
+            clean_row = {key: row.get(key, "") for key in COIN_TYPES_HEADERS}
+            clean_row["min_year"] = min_year
+            clean_row["max_year"] = max_year
+            if not clean_row.get("year_range"):
+                clean_row["year_range"] = year_range_label(min_year, max_year, clean_row.get("year", ""))
+            writer.writerow(clean_row)
 
 
 def upsert_coin_type_cache_rows(new_rows):
-    """Insert new type rows without duplicating existing cache entries."""
+    """Insert or enrich type rows without duplicating existing cache entries."""
     existing_rows = read_coin_type_cache_rows()
-    existing_keys = {coin_type_cache_key(row) for row in existing_rows}
+    existing_by_key = {coin_type_cache_key(row): row for row in existing_rows}
     changed = False
 
     for row in new_rows:
         key = coin_type_cache_key(row)
-        if key in existing_keys:
+        existing = existing_by_key.get(key)
+        if existing is None:
+            existing_rows.append(row)
+            existing_by_key[key] = row
+            changed = True
             continue
-        existing_rows.append(row)
-        existing_keys.add(key)
-        changed = True
+
+        # If a previous row was created before metadata support existed, fill in
+        # any blanks from the new Numista CSV/API data.
+        for field in COIN_TYPES_HEADERS:
+            if not str(existing.get(field, "")).strip() and str(row.get(field, "")).strip():
+                existing[field] = row.get(field, "")
+                changed = True
 
     if changed or not os.path.exists(COIN_TYPES_PATH):
         write_coin_type_cache_rows(existing_rows)
     return existing_rows
 
 
+def option_from_cache_row(row, face_value, year, mint):
+    min_year, max_year = normalized_year_bounds(row)
+    return {
+        "coin_type": row.get("coin_type", "") or row.get("numista_title", "") or "Unknown type",
+        "numista_number": clean_numista_number(row.get("numista_number", "")),
+        "numista_title": row.get("numista_title", "") or row.get("coin_type", "") or "Unknown type",
+        "numista_category": row.get("numista_category", ""),
+        "denomination": row.get("denomination", "") or make_denom_label(face_value, row.get("currency", "")),
+        "country": str(row.get("country", "")).strip(),
+        "face_value": face_value,
+        "year": str(year or row.get("year", "")).strip(),
+        "min_year": min_year,
+        "max_year": max_year,
+        "year_range": row.get("year_range", "") or year_range_label(min_year, max_year, row.get("year", "")),
+        "mint": mint,
+        "source": row.get("source", ""),
+        "composition": row.get("composition", ""),
+        "weight": row.get("weight", ""),
+        "diameter": row.get("diameter", ""),
+        "thickness": row.get("thickness", ""),
+        "orientation": row.get("orientation", ""),
+        "comments": row.get("comments", ""),
+    }
+
+
 def build_type_index_from_cache(rows):
-    type_index = {}
+    """Build exact-year and range lookup indexes from Coin_Types.csv rows.
+
+    The returned dict is backwards-compatible for exact lookups using
+    (country, face_value, year, mint). It also includes a special "__ranges__"
+    list used by get_detected_type_options() for API-added types that span many
+    years, such as N#14203 covering 1816-1835.
+    """
+    type_index = {"__ranges__": []}
+    range_seen = set()
+
     for row in rows:
         country = str(row.get("country", "")).strip()
         face_value = normalize_decimal(row.get("face_value", ""))
         year = str(row.get("year", "")).strip()
         mint = normalize_mint(row.get("mint", ""))
-        if not country or not face_value or not year:
-            continue
-        option = {
-            "coin_type": row.get("coin_type", "") or row.get("numista_title", "") or "Unknown type",
-            "numista_number": clean_numista_number(row.get("numista_number", "")),
-            "numista_title": row.get("numista_title", "") or row.get("coin_type", "") or "Unknown type",
-            "numista_category": row.get("numista_category", ""),
-            "denomination": row.get("denomination", "") or make_denom_label(face_value, row.get("currency", "")),
-            "country": country,
-            "face_value": face_value,
-            "year": year,
-            "mint": mint,
-            "source": row.get("source", ""),
-            "comments": row.get("comments", ""),
-        }
-        key = (country, face_value, year, mint)
-        bucket = type_index.setdefault(key, [])
-        if not any(existing.get("coin_type") == option["coin_type"] and existing.get("numista_number") == option["numista_number"] for existing in bucket):
-            bucket.append(option)
+        min_year, max_year = normalized_year_bounds(row)
+        source = str(row.get("source", "")).strip()
 
-    for key in type_index:
+        if not country or not face_value:
+            continue
+
+        # Exact-year index for Numista export rows and one-year API rows.
+        if year:
+            option = option_from_cache_row(row, face_value, year, mint)
+            key = (country, face_value, year, mint)
+            bucket = type_index.setdefault(key, [])
+            if not any(existing.get("coin_type") == option["coin_type"] and existing.get("numista_number") == option["numista_number"] for existing in bucket):
+                bucket.append(option)
+
+        # Range index for API/manual API rows. CSV rows are already exact by
+        # Gregorian year, so keeping their range off avoids noisy duplicates.
+        min_int = safe_int(min_year)
+        max_int = safe_int(max_year)
+        if source in ("numista_api", "manual_api") and min_int is not None and max_int is not None:
+            range_key = (
+                country, face_value, min_int, max_int, mint,
+                clean_numista_number(row.get("numista_number", "")),
+                row.get("coin_type", ""),
+            )
+            if range_key not in range_seen:
+                type_index["__ranges__"].append(option_from_cache_row(row, face_value, year, mint))
+                range_seen.add(range_key)
+
+    for key in list(type_index.keys()):
+        if key == "__ranges__":
+            continue
         type_index[key].sort(key=lambda option: (option.get("coin_type", "").lower(), clean_numista_number(option.get("numista_number", "")) or "999999999"))
+    type_index["__ranges__"].sort(key=lambda option: (option.get("coin_type", "").lower(), safe_int(option.get("min_year", ""), 999999), clean_numista_number(option.get("numista_number", "")) or "999999999"))
     return type_index
 
 
@@ -1300,7 +1532,11 @@ def prompt_manual_coin_type(session, year, mint_name, existing_notes=""):
             pass
 
     while True:
-        numista_number = text_input("Enter the Numista N# for this type. Example: 1109 or N#1109:")
+        numista_number = text_input(
+            "Enter the Numista N# for this type. Example: 1109 or N#1109:\n\n"
+            "IMPORTANT: Pressing ENTER here will call the Numista API using your saved API key.\n"
+            "After the API returns a result, you will verify it before anything is saved."
+        )
         if numista_number is None:
             return None, None
         clean_number = clean_numista_number(numista_number)
@@ -1324,9 +1560,7 @@ def prompt_manual_coin_type(session, year, mint_name, existing_notes=""):
                 continue
             return None, None
 
-        preview_numista_type_details(details)
-        print()
-        confirmed = prompt_yes_no("Add this Numista type to Coin_Types.csv?", "This saves it as a reusable type for this exact year/mint/denomination.")
+        confirmed = confirm_numista_type_details(details)
         if confirmed is None:
             return None, None
         if not confirmed:
@@ -1356,16 +1590,32 @@ def prompt_manual_coin_type(session, year, mint_name, existing_notes=""):
 def load_numista_index():
     """Load owned coins and type choices from every CSV in ./Numista CSV.
 
-    Numista export columns by position:
-      A Country, D Currency, E Face value, G N# number, H Title, I Type,
-      T Gregorian year, U Mintmark, Y Quantity.
+    Numista export columns by position. Important: Numista exports can contain
+    duplicate header names such as Weight, so this intentionally uses fixed
+    column indexes instead of DictReader names.
+
+      A  / 0  Country
+      D  / 3  Currency
+      E  / 4  Face value
+      G  / 6  N# number
+      H  / 7  Title
+      I  / 8  Type/category
+      J  / 9  Year range
+      L  / 11 Composition
+      M  / 12 Weight
+      N  / 13 Diameter
+      Q  / 16 Thickness
+      R  / 17 Orientation
+      T  / 19 Gregorian year
+      U  / 20 Mintmark
+      Y  / 24 Quantity
 
     Returns:
       index: set of owned (country, face_value, gregorian_year, mintmark)
       csv_files: loaded CSV paths
       countries: sorted country names
       denoms_by_country: {country: ["0.25 Dollar (1785-date)", ...]}
-      type_index: {(country, face_value, gregorian_year, mintmark): [type option dicts]}
+      type_index: exact-year lookup plus __ranges__ for API-added range rows
     """
     ensure_numista_dir()
     ensure_coin_types_csv()
@@ -1395,6 +1645,12 @@ def load_numista_index():
                     numista_number = row[6].strip() if len(row) > 6 else ""
                     title = row[7].strip() if len(row) > 7 else ""
                     numista_category = row[8].strip() if len(row) > 8 else ""
+                    export_year_range = row[9].strip() if len(row) > 9 else ""
+                    composition = row[11].strip() if len(row) > 11 else ""
+                    weight = row[12].strip() if len(row) > 12 else ""
+                    diameter = row[13].strip() if len(row) > 13 else ""
+                    thickness = row[16].strip() if len(row) > 16 else ""
+                    orientation = row[17].strip() if len(row) > 17 else ""
                     gregorian_year = row[19].strip() if len(row) > 19 else ""
                     mintmark = normalize_mint(row[20]) if len(row) > 20 else ""
 
@@ -1409,7 +1665,15 @@ def load_numista_index():
                         cache_rows_to_seed.append(make_coin_type_cache_row(
                             "numista_csv", country, currency, face_value, denom_label,
                             gregorian_year, mintmark, title or "Unknown type",
-                            numista_number, title, numista_category, "", path
+                            numista_number, title, numista_category, "", path,
+                            min_year=gregorian_year,
+                            max_year=gregorian_year,
+                            year_range=export_year_range or gregorian_year,
+                            composition=composition,
+                            weight=weight,
+                            diameter=diameter,
+                            thickness=thickness,
+                            orientation=orientation,
                         ))
 
                     if not gregorian_year:
@@ -1444,20 +1708,22 @@ def load_numista_index():
 def get_detected_type_options(session, year, mint_name):
     """Return Numista type choices for country/value/year.
 
-    Exact mint matches are preferred, but if the same type/Numista number exists
-    for P, D, S, W, blank/no-mint, etc., the option is still shown for the
-    currently selected mint. This fixes cases like Lincoln cent types where the
-    CSV may only have P/D logged but the S mint shares the same Numista number.
+    Match order:
+      1. Exact year + current mint candidates.
+      2. Same year from another mint.
+      3. API/manual range rows where min_year <= entered year <= max_year.
+      4. OTHER.
     """
     country = session.get("country", "").strip()
     face_value = normalize_decimal(session.get("face_value", ""))
     year_text = str(year).strip()
+    entered_year = safe_int(year_text)
     type_index = session.get("numista_type_index", {}) or {}
     options = []
     seen = set()
 
     def add_option(option, match_note=""):
-        # De-dupe by Numista number + type, intentionally ignoring mint.
+        # De-dupe by Numista number + type/title, intentionally ignoring mint.
         unique = (
             option.get("numista_number", ""),
             option.get("coin_type", ""),
@@ -1479,19 +1745,41 @@ def get_detected_type_options(session, year, mint_name):
             for option in type_index.get((country, face_value, year_text, mint), []):
                 add_option(option, "exact mint")
 
-        # 2) Then include the same country/value/year from any mint.
-        # This is what allows an S penny to use the Lincoln/Wheat/Shield type
-        # even if your CSV only contains P or D examples of that same Numista #.
-        for (idx_country, idx_face, idx_year, idx_mint), bucket in type_index.items():
+        # 2) Same country/value/year from any mint.
+        for key, bucket in type_index.items():
+            if key == "__ranges__" or not isinstance(key, tuple) or len(key) != 4:
+                continue
+            idx_country, idx_face, idx_year, idx_mint = key
             if idx_country == country and idx_face == face_value and idx_year == year_text:
                 for option in bucket:
                     if idx_mint in exact_mints:
                         continue
                     add_option(option, f"same Numista type from mint {idx_mint or 'No Mint'}")
 
+        # 3) API/manual range matches. This is what lets a single N#14203 API
+        # entry detect all Liberty Head cent years from 1816 through 1835.
+        if entered_year is not None:
+            for option in type_index.get("__ranges__", []):
+                if option.get("country", "") != country:
+                    continue
+                if normalize_decimal(option.get("face_value", "")) != face_value:
+                    continue
+                option_mint = normalize_mint(option.get("mint", ""))
+                if option_mint and option_mint not in exact_mints:
+                    # Blank mint ranges can match any mint. Specific mint ranges
+                    # only match that mint.
+                    continue
+                min_year = safe_int(option.get("min_year", ""))
+                max_year = safe_int(option.get("max_year", ""))
+                if min_year is None or max_year is None:
+                    continue
+                if min_year <= entered_year <= max_year:
+                    add_option(option, f"API range {year_range_label(min_year, max_year)}")
+
     options.sort(key=lambda option: (
-        0 if option.get("match_note") == "exact mint" else 1,
+        0 if option.get("match_note") == "exact mint" else 1 if str(option.get("match_note", "")).startswith("same Numista") else 2,
         option.get("coin_type", "").lower(),
+        safe_int(option.get("min_year", ""), 999999),
         clean_numista_number(option.get("numista_number", "")) or "999999999",
     ))
 
@@ -1504,6 +1792,9 @@ def get_detected_type_options(session, year, mint_name):
         "country": country,
         "face_value": face_value,
         "year": year_text,
+        "min_year": year_text,
+        "max_year": year_text,
+        "year_range": year_text,
         "mint": normalize_mint(mint_name),
         "selected_mint": normalize_mint(mint_name),
         "match_note": "manual",
