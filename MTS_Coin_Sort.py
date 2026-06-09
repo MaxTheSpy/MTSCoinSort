@@ -1,4 +1,4 @@
-# MTS CoinSort V0.0.19
+# MTS CoinSort V0.1.0
 # uses prompt_toolkit
 # pip install prompt_toolkit or pip install prompt_toolkit colorama
 
