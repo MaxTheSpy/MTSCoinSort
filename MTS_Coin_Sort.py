@@ -1,4 +1,4 @@
-# MTS CoinSort V0.1.2
+# MTS CoinSort V0.1.3
 # uses prompt_toolkit
 # pip install prompt_toolkit or pip install prompt_toolkit colorama
 
@@ -13,6 +13,9 @@ import builtins
 import io
 import ctypes
 import webbrowser
+import urllib.parse
+import urllib.request
+import urllib.error
 from datetime import datetime
 from collections import Counter
 
@@ -139,6 +142,8 @@ FOCUS_ORDER = ["year", "mint", "coin_type", "save", "notes", "recent", "change_d
 USE_COLOR = True
 BIG_UI = True
 ROLL_QUANTITIES = {}
+NUMISTA_CLIENT_ID = ""
+NUMISTA_API_KEY = ""
 ANSI_SUPPORTED = os.name != "nt"
 
 def enable_ansi_on_windows():
@@ -301,7 +306,7 @@ def ensure_app_dirs():
     os.makedirs(EXPORTS_DIR, exist_ok=True)
 
 def load_settings():
-    global HOTKEYS, USE_COLOR, BIG_UI, ROLL_QUANTITIES
+    global HOTKEYS, USE_COLOR, BIG_UI, ROLL_QUANTITIES, NUMISTA_CLIENT_ID, NUMISTA_API_KEY
     HOTKEYS = DEFAULT_HOTKEYS.copy()
     if not os.path.exists(SETTINGS_PATH):
         ensure_app_dirs()
@@ -322,10 +327,15 @@ def load_settings():
         USE_COLOR = bool(data.get("use_color", USE_COLOR))
         BIG_UI = bool(data.get("big_ui", BIG_UI))
         ROLL_QUANTITIES = normalize_roll_quantities(data.get("roll_quantities", {}))
+        numista_api = data.get("numista_api", {}) if isinstance(data.get("numista_api", {}), dict) else {}
+        NUMISTA_CLIENT_ID = str(numista_api.get("client_id", "") or "")
+        NUMISTA_API_KEY = str(numista_api.get("api_key", "") or "")
         ensure_app_dirs()
     except Exception:
         HOTKEYS = DEFAULT_HOTKEYS.copy()
         ROLL_QUANTITIES = {}
+        NUMISTA_CLIENT_ID = ""
+        NUMISTA_API_KEY = ""
         ensure_app_dirs()
 
 def save_settings():
@@ -336,6 +346,10 @@ def save_settings():
         "use_color": USE_COLOR,
         "big_ui": BIG_UI,
         "roll_quantities": ROLL_QUANTITIES,
+        "numista_api": {
+            "client_id": NUMISTA_CLIENT_ID,
+            "api_key": NUMISTA_API_KEY,
+        },
     }
     with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -395,6 +409,220 @@ def prompt_positive_int(title, default=""):
         print(red("Please enter a whole number greater than 0."))
         print("Press any key to try again.")
         read_key()
+
+
+def mask_secret(value):
+    value = str(value or "")
+    if not value:
+        return "(not set)"
+    if len(value) <= 8:
+        return "*" * len(value)
+    return value[:4] + ("*" * (len(value) - 8)) + value[-4:]
+
+
+def numista_api_configured():
+    return bool(str(NUMISTA_API_KEY or "").strip())
+
+
+def numista_api_settings_menu():
+    """Settings sub-page for storing Numista API credentials."""
+    global NUMISTA_CLIENT_ID, NUMISTA_API_KEY
+    index = 0
+    menu_items = ["Set / edit client ID", "Set / edit API key", "Test API key", "Clear saved API settings", "Back"]
+
+    while True:
+        clear()
+        print(c("=" * 100, "94"))
+        print(bold(cyan("NUMISTA API SETTINGS".center(100))))
+        print(c("=" * 100, "94"))
+        print()
+        print(dim("Saved in settings.json. Treat the API key like a password and do not share the file."))
+        print()
+        print(f"Client ID : {cyan(NUMISTA_CLIENT_ID or '(not set)')}")
+        print(f"API key   : {cyan(mask_secret(NUMISTA_API_KEY))}")
+        print()
+
+        for i, item in enumerate(menu_items):
+            print(reverse(item) if i == index else item)
+
+        print()
+        print(dim("TAB/DOWN/+ next | UP/- previous | ENTER select | BACKSPACE/ESC back"))
+
+        key = read_key()
+        if key in (KEY_ESC, KEY_BACKSPACE):
+            save_settings()
+            return
+        if key in (KEY_TAB, KEY_DOWN, "+", "="):
+            index = (index + 1) % len(menu_items)
+            continue
+        if key in (KEY_SHIFT_TAB, KEY_UP, "-", "_"):
+            index = (index - 1) % len(menu_items)
+            continue
+        if key != KEY_ENTER:
+            continue
+
+        selected = menu_items[index]
+        if selected == "Set / edit client ID":
+            value = text_input("Enter Numista client/user ID:", NUMISTA_CLIENT_ID)
+            if value is not None:
+                NUMISTA_CLIENT_ID = value.strip()
+                save_settings()
+        elif selected == "Set / edit API key":
+            value = text_input("Enter Numista API key:", NUMISTA_API_KEY)
+            if value is not None:
+                NUMISTA_API_KEY = value.strip()
+                save_settings()
+        elif selected == "Test API key":
+            result, error = numista_fetch_type_details("1")
+            clear()
+            if error:
+                print(red("Numista API test failed."))
+                print()
+                print(error)
+            else:
+                print(green("Numista API test worked."))
+                print()
+                print(f"Example returned: N# {result.get('id', '1')} - {result.get('title', 'Unknown')}")
+            print()
+            print("Press any key to continue.")
+            read_key()
+        elif selected == "Clear saved API settings":
+            if prompt_yes_no("Clear saved Numista API settings?", "This removes the client ID and API key from settings.json."):
+                NUMISTA_CLIENT_ID = ""
+                NUMISTA_API_KEY = ""
+                save_settings()
+        elif selected == "Back":
+            save_settings()
+            return
+
+
+def numista_fetch_type_details(numista_number):
+    """Fetch one Numista catalogue type by N# using the saved API key.
+
+    Returns (data, error). data is a dict when successful, error is a readable
+    string when credentials/network/API response failed.
+    """
+    clean_number = clean_numista_number(numista_number)
+    if not clean_number:
+        return None, "No Numista number was entered."
+    if not numista_api_configured():
+        return None, "No Numista API key is saved. Add it in Settings > Numista API settings first."
+
+    url = f"https://api.numista.com/v3/types/{urllib.parse.quote(clean_number)}?lang=en"
+    headers = {
+        "Accept": "application/json",
+        "Numista-API-Key": NUMISTA_API_KEY.strip(),
+    }
+    if NUMISTA_CLIENT_ID.strip():
+        # Numista's public examples primarily use Numista-API-Key. This is stored
+        # for your reference and included harmlessly for future compatibility.
+        headers["Numista-Client-Id"] = NUMISTA_CLIENT_ID.strip()
+
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+        return json.loads(raw), None
+    except urllib.error.HTTPError as exc:
+        try:
+            details = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            details = ""
+        return None, f"HTTP {exc.code} from Numista API. {details}".strip()
+    except urllib.error.URLError as exc:
+        return None, f"Network error while contacting Numista API: {exc.reason}"
+    except Exception as exc:
+        return None, f"Could not read Numista API response: {exc}"
+
+
+def numista_detail_value_text(details):
+    value = details.get("value", {}) if isinstance(details.get("value", {}), dict) else {}
+    return str(value.get("text", "") or "").strip()
+
+
+def numista_detail_currency_text(details):
+    currency = details.get("currency", {}) if isinstance(details.get("currency", {}), dict) else {}
+    return str(currency.get("full_name", "") or currency.get("name", "") or "").strip()
+
+
+def numista_detail_country(details):
+    issuer = details.get("issuer", {}) if isinstance(details.get("issuer", {}), dict) else {}
+    return str(issuer.get("name", "") or "").strip()
+
+
+def numista_detail_category(details):
+    return str(details.get("category", "") or details.get("type", "") or "").strip()
+
+
+def numista_detail_years(details):
+    min_year = details.get("min_year")
+    max_year = details.get("max_year")
+    if min_year and max_year:
+        return f"{min_year}-{max_year}" if str(min_year) != str(max_year) else str(min_year)
+    if min_year:
+        return str(min_year)
+    if max_year:
+        return str(max_year)
+    return "Unknown"
+
+
+def preview_numista_type_details(details):
+    """Render a compact preview of a Numista type fetched from the API."""
+    clear()
+    print(c("=" * 100, "94"))
+    print(bold(cyan("NUMISTA TYPE PREVIEW".center(100))))
+    print(c("=" * 100, "94"))
+    print()
+    print(f"N#          : {cyan(str(details.get('id', '')))}")
+    print(f"Title       : {bold(details.get('title', 'Unknown'))}")
+    print(f"Country     : {numista_detail_country(details) or 'Unknown'}")
+    print(f"Years       : {numista_detail_years(details)}")
+    print(f"Value       : {numista_detail_value_text(details) or 'Unknown'}")
+    print(f"Currency    : {numista_detail_currency_text(details) or 'Unknown'}")
+    print(f"Category    : {numista_detail_category(details) or 'Unknown'}")
+    composition = details.get("composition", {})
+    if isinstance(composition, dict) and composition.get("text"):
+        print(f"Composition : {composition.get('text')}")
+    print()
+    print(dim("This will be saved to Coin_Types.csv for the current year/mint/denomination if confirmed."))
+
+
+def make_coin_type_cache_row_from_numista_api(session, year, mint_name, details):
+    """Convert one Numista /types/{id} response into this app's Coin_Types.csv row."""
+    numista_number = clean_numista_number(details.get("id", ""))
+    title = str(details.get("title", "") or "Unknown type").strip()
+    category = numista_detail_category(details)
+    value_text = numista_detail_value_text(details)
+    currency_text = numista_detail_currency_text(details)
+    api_country = numista_detail_country(details)
+
+    comments = []
+    if api_country:
+        comments.append(f"API country: {api_country}")
+    if value_text:
+        comments.append(f"API value: {value_text}")
+    if currency_text:
+        comments.append(f"API currency: {currency_text}")
+    years = numista_detail_years(details)
+    if years != "Unknown":
+        comments.append(f"API years: {years}")
+
+    return make_coin_type_cache_row(
+        "numista_api",
+        session.get("country", "") or api_country,
+        session.get("currency", "") or currency_text,
+        session.get("face_value", ""),
+        session.get("denomination", "") or value_text,
+        year,
+        mint_name,
+        title,
+        numista_number,
+        title,
+        category,
+        "; ".join(comments),
+        "numista_api",
+    )
+
 
 def coin_roll_quantities_menu(numista_countries=None, denoms_by_country=None):
     """Settings sub-page for user-defined roll quantities by country/denomination."""
@@ -516,7 +744,7 @@ def read_assignable_key():
 def settings_menu(numista_countries=None, denoms_by_country=None):
     global USE_COLOR, BIG_UI
     actions = list(DEFAULT_HOTKEYS.keys())
-    menu_items = [HOTKEY_LABELS[action] for action in actions] + ["Coin roll quantities", "Toggle colors", "Toggle big title", "Reset hotkeys to defaults", "Back"]
+    menu_items = [HOTKEY_LABELS[action] for action in actions] + ["Coin roll quantities", "Numista API settings", "Toggle colors", "Toggle big title", "Reset hotkeys to defaults", "Back"]
     index = 0
 
     while True:
@@ -596,6 +824,8 @@ def settings_menu(numista_countries=None, denoms_by_country=None):
                 break
         elif selected == "Coin roll quantities":
             coin_roll_quantities_menu(numista_countries, denoms_by_country)
+        elif selected == "Numista API settings":
+            numista_api_settings_menu()
         elif selected == "Toggle colors":
             USE_COLOR = not USE_COLOR
             save_settings()
@@ -1038,15 +1268,27 @@ def prompt_yes_no(title, detail=""):
 
 
 def prompt_manual_coin_type(session, year, mint_name, existing_notes=""):
-    """Create a manual Coin_Types.csv entry for an OTHER type and return it.
+    """Handle OTHER type by browser search + N# + Numista API lookup.
 
-    BACKSPACE/ESC cancels the manual type flow and returns to editing the
-    current coin instead of trapping the user in the required Numista-number
-    prompt.
+    Flow:
+      1. Ask whether to open Numista search in the browser.
+      2. User enters the N# they found.
+      3. Fetch /types/{id} with the saved API key.
+      4. Preview the result and confirm.
+      5. Save the fetched type to Coin_Types.csv for the current coin.
     """
+    if not numista_api_configured():
+        clear()
+        print(red("Numista API key is not set."))
+        print()
+        print("Go to Settings > Numista API settings and save your API key first.")
+        print("Press any key to return to editing this coin.")
+        read_key()
+        return None, None
+
     should_search = prompt_yes_no(
-        "Coin type is OTHER. Search Numista now?",
-        "Yes opens a Numista search in your browser. Either way, you must enter a type note and Numista number. BACKSPACE/ESC returns to editing."
+        "Coin type is OTHER. Open Numista search in your browser?",
+        "Find the correct catalogue page, then come back and enter the N# number. BACKSPACE/ESC returns to editing."
     )
     if should_search is None:
         return None, None
@@ -1058,61 +1300,58 @@ def prompt_manual_coin_type(session, year, mint_name, existing_notes=""):
             pass
 
     while True:
-        type_note = text_input("Enter the coin type/title notes for this OTHER coin type:", existing_notes)
-        if type_note is None:
-            return None, None
-        if type_note:
-            break
-        clear()
-        print(red("Type notes are required for OTHER coin types."))
-        print("BACKSPACE/ESC from the text prompt returns to editing the coin.")
-        print("Press any key to continue.")
-        read_key()
-
-    while True:
-        numista_number = text_input("Enter the Numista number for this type, numbers only is fine:")
+        numista_number = text_input("Enter the Numista N# for this type. Example: 1109 or N#1109:")
         if numista_number is None:
             return None, None
         clean_number = clean_numista_number(numista_number)
-        if clean_number:
-            break
-        clear()
-        print(red("A Numista number is required for OTHER coin types."))
-        print("Example: enter 10969 or N# 10969")
-        print("BACKSPACE/ESC from the text prompt returns to editing the coin.")
-        print("Press any key to continue.")
-        read_key()
+        if not clean_number:
+            clear()
+            print(red("A Numista number is required."))
+            print("Example: enter 1109 or N#1109")
+            print("Press any key to continue.")
+            read_key()
+            continue
 
-    row = make_coin_type_cache_row(
-        "manual",
-        session.get("country", ""),
-        session.get("currency", ""),
-        session.get("face_value", ""),
-        session.get("denomination", ""),
-        year,
-        mint_name,
-        type_note,
-        clean_number,
-        type_note,
-        "Manual / Numista lookup",
-        type_note,
-        "manual",
-    )
-    all_rows = upsert_coin_type_cache_rows([row])
-    session["numista_type_index"] = build_type_index_from_cache(all_rows)
-    return {
-        "coin_type": row["coin_type"],
-        "numista_number": row["numista_number"],
-        "numista_title": row["numista_title"],
-        "numista_category": row["numista_category"],
-        "denomination": row["denomination"],
-        "country": row["country"],
-        "face_value": row["face_value"],
-        "year": row["year"],
-        "mint": row["mint"],
-        "selected_mint": row["mint"],
-        "match_note": "manual saved to Coin_Types.csv",
-    }, type_note
+        details, error = numista_fetch_type_details(clean_number)
+        if error:
+            clear()
+            print(red("Could not fetch that Numista type."))
+            print()
+            print(error)
+            print()
+            retry = prompt_yes_no("Try another N#?", "Choose No to return to editing the coin.")
+            if retry:
+                continue
+            return None, None
+
+        preview_numista_type_details(details)
+        print()
+        confirmed = prompt_yes_no("Add this Numista type to Coin_Types.csv?", "This saves it as a reusable type for this exact year/mint/denomination.")
+        if confirmed is None:
+            return None, None
+        if not confirmed:
+            retry = prompt_yes_no("Try another N#?", "Choose No to return to editing the coin.")
+            if retry:
+                continue
+            return None, None
+
+        row = make_coin_type_cache_row_from_numista_api(session, year, mint_name, details)
+        all_rows = upsert_coin_type_cache_rows([row])
+        session["numista_type_index"] = build_type_index_from_cache(all_rows)
+
+        return {
+            "coin_type": row["coin_type"],
+            "numista_number": row["numista_number"],
+            "numista_title": row["numista_title"],
+            "numista_category": row["numista_category"],
+            "denomination": row["denomination"],
+            "country": row["country"],
+            "face_value": row["face_value"],
+            "year": row["year"],
+            "mint": row["mint"],
+            "selected_mint": row["mint"],
+            "match_note": "Numista API saved to Coin_Types.csv",
+        }, row["coin_type"]
 
 def load_numista_index():
     """Load owned coins and type choices from every CSV in ./Numista CSV.
