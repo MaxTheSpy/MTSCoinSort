@@ -2,8 +2,11 @@
 A list of ongoing changes per version release. 
 
 ## V0.1.3
-- Added numista API support for searching numista number which will then populate `Coin_Types.csv`
-- Users can now change country/denomination through a single session, if type you found in unowned, it prompts you to enter a numista number which will use the API to gather the Country, Denomination, and year range for that coin.
+- *NEW* - Added numista API support for searching numista number which will then populate `Coin_Types.csv`
+- *NEW* - API Max quota usage. `Settings>Numista API Settings>Set monthly API Call Max`
+- *NEW* - Users can now see API stats such as `API calls used`, `remaining api calls`, `success/failed calls` and `lifetime API calls` (Note: Calls made outside of this software will not count. )
+- *Modified* - Users can now change country/denomination through a single session, if type you found in unowned, it prompts you to enter a numista number which will use the API to gather the `Country`, `Denomination`, and `year range` for that coin.
+- *Fixed* - On the coin sort screen, when tabbing down in bulk sorting mode, you could selet an invisible "Next Roll" option used for CRH. You can no longer select this invisible option in standard bulk mode.
 
 ## V0.1.2
 - Removed `Collection Sorting` and `Collection Audit` session types.

@@ -161,6 +161,21 @@ ROLL_QUANTITIES = {}
 CUSTOM_DENOMINATIONS = []
 NUMISTA_CLIENT_ID = ""
 NUMISTA_API_KEY = ""
+
+DEFAULT_NUMISTA_API_USAGE = {
+    "month": "",
+    "max_monthly_calls": 2000,
+    "warn_percent": 85,
+    "api_calls_this_month": 0,
+    "successful_calls_this_month": 0,
+    "failed_calls_this_month": 0,
+    "cache_hits_this_month": 0,
+    "api_calls_lifetime": 0,
+    "cache_hits_lifetime": 0,
+    "last_api_call": "",
+    "last_cache_hit": "",
+}
+NUMISTA_API_USAGE = DEFAULT_NUMISTA_API_USAGE.copy()
 ANSI_SUPPORTED = os.name != "nt"
 
 def enable_ansi_on_windows():
@@ -323,7 +338,7 @@ def ensure_app_dirs():
     os.makedirs(EXPORTS_DIR, exist_ok=True)
 
 def load_settings():
-    global HOTKEYS, USE_COLOR, BIG_UI, ROLL_QUANTITIES, CUSTOM_DENOMINATIONS, NUMISTA_CLIENT_ID, NUMISTA_API_KEY
+    global HOTKEYS, USE_COLOR, BIG_UI, ROLL_QUANTITIES, CUSTOM_DENOMINATIONS, NUMISTA_CLIENT_ID, NUMISTA_API_KEY, NUMISTA_API_USAGE
     HOTKEYS = DEFAULT_HOTKEYS.copy()
     if not os.path.exists(SETTINGS_PATH):
         ensure_app_dirs()
@@ -348,6 +363,7 @@ def load_settings():
         numista_api = data.get("numista_api", {}) if isinstance(data.get("numista_api", {}), dict) else {}
         NUMISTA_CLIENT_ID = str(numista_api.get("client_id", "") or "")
         NUMISTA_API_KEY = str(numista_api.get("api_key", "") or "")
+        NUMISTA_API_USAGE = normalize_numista_api_usage(numista_api.get("usage", {}))
         ensure_app_dirs()
     except Exception:
         HOTKEYS = DEFAULT_HOTKEYS.copy()
@@ -355,6 +371,7 @@ def load_settings():
         CUSTOM_DENOMINATIONS = []
         NUMISTA_CLIENT_ID = ""
         NUMISTA_API_KEY = ""
+        NUMISTA_API_USAGE = DEFAULT_NUMISTA_API_USAGE.copy()
         ensure_app_dirs()
 
 def save_settings():
@@ -369,6 +386,7 @@ def save_settings():
         "numista_api": {
             "client_id": NUMISTA_CLIENT_ID,
             "api_key": NUMISTA_API_KEY,
+            "usage": refresh_numista_api_usage_month(NUMISTA_API_USAGE),
         },
     }
     with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
@@ -630,13 +648,246 @@ def numista_api_configured():
     return bool(str(NUMISTA_API_KEY or "").strip())
 
 
+def numista_usage_month_key():
+    return datetime.now().strftime("%Y-%m")
+
+
+def safe_positive_int(value, default=0):
+    try:
+        number = int(float(str(value).strip()))
+    except Exception:
+        return default
+    return number if number >= 0 else default
+
+
+def normalize_numista_api_usage(value):
+    """Clean the Numista API usage block stored in settings.json."""
+    usage = DEFAULT_NUMISTA_API_USAGE.copy()
+    if isinstance(value, dict):
+        for key in usage:
+            if key in value:
+                usage[key] = value[key]
+
+    usage["max_monthly_calls"] = safe_positive_int(usage.get("max_monthly_calls"), 2000)
+    usage["warn_percent"] = min(100, max(1, safe_positive_int(usage.get("warn_percent"), 85)))
+    for key in (
+        "api_calls_this_month", "successful_calls_this_month", "failed_calls_this_month",
+        "cache_hits_this_month", "api_calls_lifetime", "cache_hits_lifetime",
+    ):
+        usage[key] = safe_positive_int(usage.get(key), 0)
+    usage["month"] = str(usage.get("month", "") or "")
+    usage["last_api_call"] = str(usage.get("last_api_call", "") or "")
+    usage["last_cache_hit"] = str(usage.get("last_cache_hit", "") or "")
+    return refresh_numista_api_usage_month(usage, save=False)
+
+
+def refresh_numista_api_usage_month(usage=None, save=False):
+    """Reset monthly counters when the calendar month changes."""
+    global NUMISTA_API_USAGE
+    usage = normalize_numista_api_usage_no_refresh(usage or NUMISTA_API_USAGE)
+    month = numista_usage_month_key()
+    if usage.get("month") != month:
+        usage["month"] = month
+        usage["api_calls_this_month"] = 0
+        usage["successful_calls_this_month"] = 0
+        usage["failed_calls_this_month"] = 0
+        usage["cache_hits_this_month"] = 0
+        usage["last_api_call"] = ""
+        usage["last_cache_hit"] = ""
+    NUMISTA_API_USAGE = usage
+    if save:
+        save_settings()
+    return usage
+
+
+def normalize_numista_api_usage_no_refresh(value):
+    usage = DEFAULT_NUMISTA_API_USAGE.copy()
+    if isinstance(value, dict):
+        for key in usage:
+            if key in value:
+                usage[key] = value[key]
+    usage["max_monthly_calls"] = safe_positive_int(usage.get("max_monthly_calls"), 2000)
+    usage["warn_percent"] = min(100, max(1, safe_positive_int(usage.get("warn_percent"), 85)))
+    for key in (
+        "api_calls_this_month", "successful_calls_this_month", "failed_calls_this_month",
+        "cache_hits_this_month", "api_calls_lifetime", "cache_hits_lifetime",
+    ):
+        usage[key] = safe_positive_int(usage.get(key), 0)
+    usage["month"] = str(usage.get("month", "") or "")
+    usage["last_api_call"] = str(usage.get("last_api_call", "") or "")
+    usage["last_cache_hit"] = str(usage.get("last_cache_hit", "") or "")
+    return usage
+
+
+def numista_usage_remaining_calls():
+    usage = refresh_numista_api_usage_month(NUMISTA_API_USAGE)
+    return max(0, usage.get("max_monthly_calls", 0) - usage.get("api_calls_this_month", 0))
+
+
+def numista_usage_summary_lines():
+    usage = refresh_numista_api_usage_month(NUMISTA_API_USAGE)
+    limit = usage.get("max_monthly_calls", 0)
+    used = usage.get("api_calls_this_month", 0)
+    remaining = max(0, limit - used)
+    warn_at = int(limit * usage.get("warn_percent", 85) / 100) if limit else 0
+    return [
+        f"Usage month       : {usage.get('month', numista_usage_month_key())}",
+        f"Monthly max calls : {limit}",
+        f"API calls used    : {used}",
+        f"Remaining calls   : {remaining}",
+        f"Warning starts at : {warn_at} calls ({usage.get('warn_percent', 85)}%)",
+        f"Successful calls  : {usage.get('successful_calls_this_month', 0)}",
+        f"Failed calls      : {usage.get('failed_calls_this_month', 0)}",
+        f"Local cache hits  : {usage.get('cache_hits_this_month', 0)}",
+        f"Lifetime API calls: {usage.get('api_calls_lifetime', 0)}",
+        f"Lifetime cache hits: {usage.get('cache_hits_lifetime', 0)}",
+        f"Last API call     : {usage.get('last_api_call') or 'Never'}",
+    ]
+
+
+def set_numista_monthly_call_limit():
+    global NUMISTA_API_USAGE
+    usage = refresh_numista_api_usage_month(NUMISTA_API_USAGE)
+    current = usage.get("max_monthly_calls", 2000)
+    value = prompt_positive_int(
+        "Maximum Numista API calls you are willing to spend per calendar month:\n\n"
+        "Recommended: 2000 or lower if that is your monthly Numista quota.\n"
+        "The app will block API lookups after this number is reached.",
+        current,
+    )
+    if value is not None:
+        usage["max_monthly_calls"] = value
+        NUMISTA_API_USAGE = usage
+        save_settings()
+
+
+def set_numista_warning_percent():
+    global NUMISTA_API_USAGE
+    usage = refresh_numista_api_usage_month(NUMISTA_API_USAGE)
+    while True:
+        value = text_input(
+            "Warn when monthly Numista API usage reaches what percent of your limit?\n\n"
+            "Example: 85 means warn after 85% of your monthly max is used.",
+            str(usage.get("warn_percent", 85)),
+        )
+        if value is None:
+            return
+        try:
+            percent = int(float(value))
+        except ValueError:
+            percent = 0
+        if 1 <= percent <= 100:
+            usage["warn_percent"] = percent
+            NUMISTA_API_USAGE = usage
+            save_settings()
+            return
+        clear()
+        print(red("Please enter a number from 1 to 100."))
+        print("Press any key to try again.")
+        read_key()
+
+
+def reset_numista_monthly_usage():
+    global NUMISTA_API_USAGE
+    usage = refresh_numista_api_usage_month(NUMISTA_API_USAGE)
+    if prompt_yes_no(
+        "Reset this month's Numista API usage counters?",
+        "This only resets the local app counters in settings.json. It does not reset Numista's real quota.",
+    ):
+        usage["api_calls_this_month"] = 0
+        usage["successful_calls_this_month"] = 0
+        usage["failed_calls_this_month"] = 0
+        usage["cache_hits_this_month"] = 0
+        usage["last_api_call"] = ""
+        usage["last_cache_hit"] = ""
+        NUMISTA_API_USAGE = usage
+        save_settings()
+
+
+def log_numista_cache_hit(numista_number=""):
+    global NUMISTA_API_USAGE
+    usage = refresh_numista_api_usage_month(NUMISTA_API_USAGE)
+    usage["cache_hits_this_month"] = usage.get("cache_hits_this_month", 0) + 1
+    usage["cache_hits_lifetime"] = usage.get("cache_hits_lifetime", 0) + 1
+    usage["last_cache_hit"] = datetime.now().isoformat(timespec="seconds")
+    NUMISTA_API_USAGE = usage
+    save_settings()
+
+
+def log_numista_api_call(numista_number="", success=False):
+    global NUMISTA_API_USAGE
+    usage = refresh_numista_api_usage_month(NUMISTA_API_USAGE)
+    usage["api_calls_this_month"] = usage.get("api_calls_this_month", 0) + 1
+    usage["api_calls_lifetime"] = usage.get("api_calls_lifetime", 0) + 1
+    if success:
+        usage["successful_calls_this_month"] = usage.get("successful_calls_this_month", 0) + 1
+    else:
+        usage["failed_calls_this_month"] = usage.get("failed_calls_this_month", 0) + 1
+    usage["last_api_call"] = datetime.now().isoformat(timespec="seconds")
+    NUMISTA_API_USAGE = usage
+    save_settings()
+
+
+def guard_numista_api_call(numista_number=""):
+    """Return True when one more Numista API call is allowed by user settings."""
+    usage = refresh_numista_api_usage_month(NUMISTA_API_USAGE)
+    limit = usage.get("max_monthly_calls", 0)
+    used = usage.get("api_calls_this_month", 0)
+    next_call = used + 1
+
+    if limit <= 0:
+        clear()
+        print(red("Numista API calls are blocked."))
+        print()
+        print("Your monthly max call setting is 0. Increase it in Settings > Numista API settings to allow API lookups.")
+        print("Press any key to return.")
+        read_key()
+        return False
+
+    if used >= limit:
+        clear()
+        print(red("Numista API monthly max reached."))
+        print()
+        print(f"Local counter: {used} / {limit} calls used for {usage.get('month', numista_usage_month_key())}.")
+        print("This API lookup was blocked to protect your chosen monthly limit.")
+        print()
+        print(dim("Use the local cache, raise the monthly max, or reset the local counter if you know it is wrong."))
+        print("Press any key to return.")
+        read_key()
+        return False
+
+    warn_at = int(limit * usage.get("warn_percent", 85) / 100)
+    if next_call >= warn_at:
+        return bool(prompt_yes_no(
+            "Numista API usage warning.",
+            f"This lookup will use call {next_call} of your {limit} monthly max for {usage.get('month', numista_usage_month_key())}.\n\n"
+            "Continue with this API call?",
+        ))
+
+    return True
+
+
 def numista_api_settings_menu():
-    """Settings sub-page for storing Numista API credentials."""
+    """Settings sub-page for storing Numista API credentials and quota guard settings."""
     global NUMISTA_CLIENT_ID, NUMISTA_API_KEY
     index = 0
-    menu_items = ["Set / edit client ID", "Set / edit API key", "Test API key", "Clear saved API settings", "Back"]
+    menu_items = [
+        "Set / edit client ID",
+        "Set / edit API key",
+        "Set monthly API call max",
+        "Set warning percent",
+        "Reset this month's local usage counters",
+        "Test API key",
+        "Clear saved API settings",
+        "Back",
+    ]
 
     while True:
+        usage = refresh_numista_api_usage_month(NUMISTA_API_USAGE)
+        limit = usage.get("max_monthly_calls", 0)
+        used = usage.get("api_calls_this_month", 0)
+        remaining = max(0, limit - used)
+
         clear()
         print(c("=" * 100, "94"))
         print(bold(cyan("NUMISTA API SETTINGS".center(100))))
@@ -646,6 +897,17 @@ def numista_api_settings_menu():
         print()
         print(f"Client ID : {cyan(NUMISTA_CLIENT_ID or '(not set)')}")
         print(f"API key   : {cyan(mask_secret(NUMISTA_API_KEY))}")
+        print()
+        print(bold("Usage guard"))
+        print(f"Month              : {cyan(usage.get('month', numista_usage_month_key()))}")
+        print(f"Monthly max calls  : {cyan(limit)}")
+        print(f"API calls used     : {yellow(used) if used >= limit else cyan(used)}")
+        print(f"Remaining calls    : {red(remaining) if remaining == 0 else green(remaining)}")
+        print(f"Warning threshold  : {cyan(str(usage.get('warn_percent', 85)) + '%')}")
+        print(f"Successful / failed: {green(usage.get('successful_calls_this_month', 0))} / {red(usage.get('failed_calls_this_month', 0))}")
+        print(f"Local cache hits   : {green(usage.get('cache_hits_this_month', 0))} this month, {green(usage.get('cache_hits_lifetime', 0))} lifetime")
+        print(f"Lifetime API calls : {cyan(usage.get('api_calls_lifetime', 0))}")
+        print(f"Last API call      : {usage.get('last_api_call') or 'Never'}")
         print()
 
         for i, item in enumerate(menu_items):
@@ -678,6 +940,12 @@ def numista_api_settings_menu():
             if value is not None:
                 NUMISTA_API_KEY = value.strip()
                 save_settings()
+        elif selected == "Set monthly API call max":
+            set_numista_monthly_call_limit()
+        elif selected == "Set warning percent":
+            set_numista_warning_percent()
+        elif selected == "Reset this month's local usage counters":
+            reset_numista_monthly_usage()
         elif selected == "Test API key":
             result, error = numista_fetch_type_details("1")
             clear()
@@ -693,14 +961,13 @@ def numista_api_settings_menu():
             print("Press any key to continue.")
             read_key()
         elif selected == "Clear saved API settings":
-            if prompt_yes_no("Clear saved Numista API settings?", "This removes the client ID and API key from settings.json."):
+            if prompt_yes_no("Clear saved Numista API settings?", "This removes the client ID and API key from settings.json. Usage counters are kept."):
                 NUMISTA_CLIENT_ID = ""
                 NUMISTA_API_KEY = ""
                 save_settings()
         elif selected == "Back":
             save_settings()
             return
-
 
 def numista_fetch_type_details(numista_number):
     """Fetch one Numista catalogue type by N# using the saved API key.
@@ -713,6 +980,8 @@ def numista_fetch_type_details(numista_number):
         return None, "No Numista number was entered."
     if not numista_api_configured():
         return None, "No Numista API key is saved. Add it in Settings > Numista API settings first."
+    if not guard_numista_api_call(clean_number):
+        return None, "Numista API lookup was blocked by your monthly usage guard."
 
     url = f"https://api.numista.com/v3/types/{urllib.parse.quote(clean_number)}?lang=en"
     headers = {
@@ -728,16 +997,20 @@ def numista_fetch_type_details(numista_number):
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             raw = response.read().decode("utf-8", errors="replace")
+        log_numista_api_call(clean_number, success=True)
         return json.loads(raw), None
     except urllib.error.HTTPError as exc:
         try:
             details = exc.read().decode("utf-8", errors="replace")
         except Exception:
             details = ""
+        log_numista_api_call(clean_number, success=False)
         return None, f"HTTP {exc.code} from Numista API. {details}".strip()
     except urllib.error.URLError as exc:
+        log_numista_api_call(clean_number, success=False)
         return None, f"Network error while contacting Numista API: {exc.reason}"
     except Exception as exc:
+        log_numista_api_call(clean_number, success=False)
         return None, f"Could not read Numista API response: {exc}"
 
 
@@ -950,6 +1223,7 @@ def prompt_numista_country_denom_from_api(default_country=""):
             if local_choice_action is None:
                 return None
             if local_choice_action == "use":
+                log_numista_cache_hit(clean_number)
                 choice = cached_row_choice(cached_row)
                 if not choice:
                     clear()
@@ -2212,6 +2486,7 @@ def prompt_manual_coin_type(session, year, mint_name, existing_notes=""):
             if local_choice_action is None:
                 return None, None
             if local_choice_action == "use":
+                log_numista_cache_hit(clean_number)
                 all_rows = read_coin_type_cache_rows()
                 session["numista_type_index"] = build_type_index_from_cache(all_rows)
                 option = cached_row_type_option(cached_row, current_year=year, current_mint=mint_name, match_note="local Coin_Types.csv cache")
