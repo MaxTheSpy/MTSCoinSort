@@ -1,6 +1,6 @@
 # MTS CoinSort V0.1.3
-# uses prompt_toolkit
-# pip install prompt_toolkit or pip install prompt_toolkit colorama
+# no external dependencies required
+# Uses msvcrt on Windows and termios/tty on Linux/macOS
 
 import csv
 import json
@@ -26,12 +26,6 @@ except ImportError:
     termios = None
     tty = None
 
-try:
-    from prompt_toolkit.input import create_input
-    from prompt_toolkit.keys import Keys
-except ImportError:
-    create_input = None
-    Keys = None
 
 try:
     import msvcrt
@@ -615,8 +609,6 @@ def get_roll_quantity_for_choice(choice):
     key = roll_quantity_key(choice.get("country", ""), choice.get("face_value", ""), choice.get("currency", ""))
     return ROLL_QUANTITIES.get(key)
 
-def get_roll_quantity(session):
-    return get_roll_quantity_for_choice(session)
 
 def prompt_positive_int(title, default=""):
     while True:
@@ -719,30 +711,8 @@ def normalize_numista_api_usage_no_refresh(value):
     return usage
 
 
-def numista_usage_remaining_calls():
-    usage = refresh_numista_api_usage_month(NUMISTA_API_USAGE)
-    return max(0, usage.get("max_monthly_calls", 0) - usage.get("api_calls_this_month", 0))
 
 
-def numista_usage_summary_lines():
-    usage = refresh_numista_api_usage_month(NUMISTA_API_USAGE)
-    limit = usage.get("max_monthly_calls", 0)
-    used = usage.get("api_calls_this_month", 0)
-    remaining = max(0, limit - used)
-    warn_at = int(limit * usage.get("warn_percent", 85) / 100) if limit else 0
-    return [
-        f"Usage month       : {usage.get('month', numista_usage_month_key())}",
-        f"Monthly max calls : {limit}",
-        f"API calls used    : {used}",
-        f"Remaining calls   : {remaining}",
-        f"Warning starts at : {warn_at} calls ({usage.get('warn_percent', 85)}%)",
-        f"Successful calls  : {usage.get('successful_calls_this_month', 0)}",
-        f"Failed calls      : {usage.get('failed_calls_this_month', 0)}",
-        f"Local cache hits  : {usage.get('cache_hits_this_month', 0)}",
-        f"Lifetime API calls: {usage.get('api_calls_lifetime', 0)}",
-        f"Lifetime cache hits: {usage.get('cache_hits_lifetime', 0)}",
-        f"Last API call     : {usage.get('last_api_call') or 'Never'}",
-    ]
 
 
 def set_numista_monthly_call_limit():
@@ -1319,25 +1289,6 @@ def numista_detail_years(details):
     return "Unknown"
 
 
-def preview_numista_type_details(details):
-    """Render a compact preview of a Numista type fetched from the API."""
-    clear()
-    print(c("=" * 100, "94"))
-    print(bold(cyan("NUMISTA TYPE PREVIEW".center(100))))
-    print(c("=" * 100, "94"))
-    print()
-    print(f"N#          : {cyan(str(details.get('id', '')))}")
-    print(f"Title       : {bold(details.get('title', 'Unknown'))}")
-    print(f"Country     : {numista_detail_country(details) or 'Unknown'}")
-    print(f"Years       : {numista_detail_years(details)}")
-    print(f"Value       : {numista_detail_value_text(details) or 'Unknown'}")
-    print(f"Currency    : {numista_detail_currency_text(details) or 'Unknown'}")
-    print(f"Category    : {numista_detail_category(details) or 'Unknown'}")
-    composition = details.get("composition", {})
-    if isinstance(composition, dict) and composition.get("text"):
-        print(f"Composition : {composition.get('text')}")
-    print()
-    print(dim("This will be saved to Coin_Types.csv. If the API provides a year range, all years in that range will match."))
 
 
 def confirm_numista_type_details(details):
@@ -1674,17 +1625,11 @@ def settings_menu(numista_countries=None, denoms_by_country=None):
 
 def read_key():
     _flush_screen_buffer()
-    """Cross-platform key reader.
+    """Cross-platform single-key reader.
 
-    IMPORTANT: The first Prompt Toolkit test created/closed a prompt_toolkit
-    input object on every keypress. On some terminals that can cause rapid
-    repainting/flashing because the terminal mode is constantly reset while
-    the rest of this app is also clearing/redrawing the screen.
-
-    This version keeps the existing no-dependency Unix reader on Linux/macOS
-    and uses Windows' built-in msvcrt reader on Windows. Prompt Toolkit can
-    still be used later for a fuller UI rewrite, but this avoids the flashing
-    while preserving Windows compatibility for the current app structure.
+    Windows uses msvcrt. Linux/macOS use the termios/tty raw-mode reader.
+    This avoids external keyboard dependencies and keeps the app usable in
+    normal console builds on both Windows and Linux.
     """
     if os.name == "nt" and msvcrt is not None:
         return read_key_windows()
@@ -1716,62 +1661,6 @@ def read_key_windows():
         return KEY_ESC
     return ch
 
-def read_key_prompt_toolkit():
-    """Optional single-key Prompt Toolkit reader kept for future experiments.
-
-    It is intentionally not used by read_key() right now because repeatedly
-    entering/leaving prompt_toolkit raw mode caused screen flashing in this app.
-    """
-    if create_input is None:
-        return read_key_windows() if os.name == "nt" and msvcrt is not None else read_key_unix()
-    inp = create_input()
-    try:
-        with inp.raw_mode():
-            key_presses = inp.read_keys()
-    finally:
-        try:
-            inp.close()
-        except Exception:
-            pass
-
-    if not key_presses:
-        return ""
-
-    kp = key_presses[0]
-    key = kp.key
-    data = kp.data
-
-    mapping = {
-        getattr(Keys, "Enter", None): KEY_ENTER,
-        getattr(Keys, "ControlM", None): KEY_ENTER,
-        getattr(Keys, "Tab", None): KEY_TAB,
-        getattr(Keys, "ControlI", None): KEY_TAB,
-        getattr(Keys, "BackTab", None): KEY_SHIFT_TAB,
-        getattr(Keys, "Backspace", None): KEY_BACKSPACE,
-        getattr(Keys, "Delete", None): KEY_DELETE,
-        getattr(Keys, "Escape", None): KEY_ESC,
-        getattr(Keys, "Up", None): KEY_UP,
-        getattr(Keys, "Down", None): KEY_DOWN,
-        getattr(Keys, "Right", None): KEY_RIGHT,
-        getattr(Keys, "Left", None): KEY_LEFT,
-    }
-    if key in mapping and mapping[key] is not None:
-        return mapping[key]
-
-    if data in ("\r", "\n"):
-        return KEY_ENTER
-    if data == "\t":
-        return KEY_TAB
-    if data in ("\x7f", "\b"):
-        return KEY_BACKSPACE
-    if data == "\x1b":
-        return KEY_ESC
-
-    if isinstance(data, str) and len(data) == 1:
-        return data
-    if isinstance(key, str) and len(key) == 1:
-        return key
-    return str(key)
 
 def read_key_unix():
     """Linux/macOS raw key reader with Tab, arrows, numpad chars, Enter, Backspace."""
@@ -4042,8 +3931,6 @@ def get_year_range_for_session(session):
         return 1792, max_year
     return 1600, max_year
 
-def year_is_complete(year):
-    return len(str(year).strip()) == 4 and str(year).strip().isdigit()
 
 def year_warning(session, year):
     if not year:
@@ -4158,12 +4045,14 @@ def suggest_year_corrections(year_text, log, session):
 def focus_order_for_session(session):
     """Return the visible/selectable focus targets for the active session.
 
-    Next Roll should only exist in manual Coin Roll Hunt mode. In normal sort
-    modes it is not displayed, so it should not be reachable by TAB/arrows.
+    Next Roll should only exist in Coin Roll Hunt sessions with roll tracking.
+    In normal sort modes it is not displayed, so it should not be reachable
+    by TAB/arrows. Automatic CRH still shows it as a manual override for
+    short or partial rolls.
     """
     order = list(BASE_FOCUS_ORDER)
 
-    if session.get("session_type") == "Coin roll hunt" and session.get("roll_mode") == "manual":
+    if session.get("session_type") == "Coin roll hunt" and session.get("roll_mode") in ("automatic", "manual"):
         insert_at = order.index("statistics")
         order[insert_at:insert_at] = CRH_MANUAL_EXTRA_FOCUS
 
@@ -4427,8 +4316,9 @@ def draw(session, year, mint_index, coin_type_index, notes, reject, reject_reaso
     print(f"{(reverse(' Recent/Edit ') if focus == 'recent' else bold(' Recent/Edit '))} {dim('ENTER opens full previous-coin edit list')}")
     print(f"{(reverse(' Change Country/Denom ') if focus == 'change_denom' else bold(' Change Country/Denom '))} {dim('ENTER changes/adds active sorting selection')}")
     print(f"{(reverse(' Edit Session Notes ') if focus == 'session_notes' else bold(' Edit Session Notes '))} {dim('ENTER edits title-level notes for this session')}")
-    if session.get("session_type") == "Coin roll hunt" and session.get("roll_mode") == "manual":
-        print(f"{(reverse(' Next Roll ') if focus == 'next_roll' else bold(' Next Roll '))} {dim('ENTER starts the next roll manually')}")
+    if session.get("session_type") == "Coin roll hunt" and session.get("roll_mode") in ("automatic", "manual"):
+        next_roll_hint = "ENTER forces the next roll now" if session.get("roll_mode") == "automatic" else "ENTER starts the next roll manually"
+        print(f"{(reverse(' Next Roll ') if focus == 'next_roll' else bold(' Next Roll '))} {dim(next_roll_hint)}")
     print(f"{(reverse(' Statistics ') if focus == 'statistics' else bold(' Statistics '))} {dim('ENTER opens session statistics page')}")
     print(f"{(reverse(' Save + Quit ') if focus == 'quit' else bold(' Save + Quit '))} {dim('ENTER opens confirmation')}")
 
@@ -4473,10 +4363,12 @@ def draw(session, year, mint_index, coin_type_index, notes, reject, reject_reaso
     elif focus == "session_notes":
         print("Press ENTER to edit session-level notes, such as cool finds, where coins came from, or what you paid.")
     elif focus == "next_roll":
-        if session.get("session_type") == "Coin roll hunt" and session.get("roll_mode") == "manual":
+        if session.get("session_type") == "Coin roll hunt" and session.get("roll_mode") == "automatic":
+            print("Press ENTER to force the next roll now. Use this for short, partial, or odd rolls.")
+        elif session.get("session_type") == "Coin roll hunt" and session.get("roll_mode") == "manual":
             print("Press ENTER when you are ready to start the next roll.")
         else:
-            print("Next Roll is only active for manual Coin Roll Hunt sessions.")
+            print("Next Roll is only active for Coin Roll Hunt sessions with roll tracking.")
     elif focus == "statistics":
         print("Press ENTER to open a separate statistics page for this session CSV.")
     elif focus == "quit":
@@ -4640,7 +4532,7 @@ def confirm_save_quit(session):
 
 
 def advance_manual_roll(session):
-    if session.get("session_type") != "Coin roll hunt" or session.get("roll_mode") != "manual":
+    if session.get("session_type") != "Coin roll hunt" or session.get("roll_mode") not in ("automatic", "manual"):
         return False
     session["current_roll"] = int(session.get("current_roll", 1) or 1) + 1
     session["current_roll_count"] = 0
@@ -4694,11 +4586,6 @@ def sorting_loop(session):
         editing_index = index
         return_to_recent_after_edit = bool(return_to_recent)
         focus = "year"
-
-    def load_selected_for_edit():
-        if selected_index == -1:
-            return
-        load_index_for_edit(selected_index, return_to_recent=True)
 
     def finish_save():
         nonlocal year, mint_index, coin_type_index, notes, reject, reject_reason, keep_bulk, focus, editing_index, selected_index, return_to_recent_after_edit
@@ -4831,7 +4718,7 @@ def sorting_loop(session):
                 edit_session_notes(session)
                 focus = "year"
             elif focus == "next_roll":
-                if session.get("session_type") == "Coin roll hunt" and session.get("roll_mode") == "manual":
+                if session.get("session_type") == "Coin roll hunt" and session.get("roll_mode") in ("automatic", "manual"):
                     advance_manual_roll(session)
                 focus = "year"
             elif focus == "statistics":
