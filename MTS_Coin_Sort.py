@@ -137,7 +137,20 @@ KEY_ESC = "ESC"
 KEY_TAB = "TAB"
 KEY_SHIFT_TAB = "SHIFT_TAB"
 
-FOCUS_ORDER = ["year", "mint", "coin_type", "save", "notes", "recent", "change_denom", "session_notes", "next_roll", "statistics", "quit"]
+BASE_FOCUS_ORDER = [
+    "year",
+    "mint",
+    "coin_type",
+    "save",
+    "notes",
+    "recent",
+    "change_denom",
+    "session_notes",
+    "statistics",
+    "quit",
+]
+
+CRH_MANUAL_EXTRA_FOCUS = ["next_roll"]
 
 # ANSI color/bold works in most Linux terminals.
 # On Windows, we attempt to enable Virtual Terminal Processing. If that is not
@@ -895,6 +908,20 @@ def prompt_numista_country_denom_from_api(default_country=""):
         print("Press any key to return.")
         read_key()
         return None
+
+    should_search = prompt_yes_no(
+        "Open Numista search in your browser?",
+        "Find the correct catalogue page, then come back and enter the N# number.\n\n"
+        "Choose No if you already know the Numista number."
+    )
+    if should_search is None:
+        return None
+
+    if should_search:
+        try:
+            webbrowser.open(numista_country_denom_search_url(default_country))
+        except Exception:
+            pass
 
     while True:
         prompt = (
@@ -2111,6 +2138,15 @@ def numista_search_url(session, year, mint_name):
     ]
     query = "+".join(re.sub(r"\s+", "+", str(p).strip()) for p in parts if p and str(p).strip())
     return f"https://en.numista.com/catalogue/index.php?r={query}&ct=coin"
+
+
+def numista_country_denom_search_url(default_country=""):
+    """Build a Numista catalogue search page for adding a country/denomination by N#."""
+    country = str(default_country or "").strip()
+    if country:
+        query = urllib.parse.quote_plus(country)
+        return f"https://en.numista.com/catalogue/index.php?r={query}&ct=coin"
+    return "https://en.numista.com/catalogue/index.php?ct=coin"
 
 
 def prompt_yes_no(title, detail=""):
@@ -3844,9 +3880,34 @@ def suggest_year_corrections(year_text, log, session):
 
     return sorted(candidates, key=score)[:5]
 
-def next_focus(focus, direction=1):
-    i = FOCUS_ORDER.index(focus)
-    return FOCUS_ORDER[(i + direction) % len(FOCUS_ORDER)]
+def focus_order_for_session(session):
+    """Return the visible/selectable focus targets for the active session.
+
+    Next Roll should only exist in manual Coin Roll Hunt mode. In normal sort
+    modes it is not displayed, so it should not be reachable by TAB/arrows.
+    """
+    order = list(BASE_FOCUS_ORDER)
+
+    if session.get("session_type") == "Coin roll hunt" and session.get("roll_mode") == "manual":
+        insert_at = order.index("statistics")
+        order[insert_at:insert_at] = CRH_MANUAL_EXTRA_FOCUS
+
+    return order
+
+
+def normalize_focus_for_session(session, focus):
+    """Move invisible/invalid focus targets back to year entry."""
+    order = focus_order_for_session(session)
+    if focus in order:
+        return focus
+    return "year"
+
+
+def next_focus(session, focus, direction=1):
+    order = focus_order_for_session(session)
+    focus = normalize_focus_for_session(session, focus)
+    i = order.index(focus)
+    return order[(i + direction) % len(order)]
 
 
 
@@ -4385,9 +4446,10 @@ def sorting_loop(session):
 
     def move_focus(direction):
         nonlocal focus
-        focus = next_focus(focus, direction)
+        focus = next_focus(session, focus, direction)
 
     while True:
+        focus = normalize_focus_for_session(session, focus)
         draw(session, year, mint_index, coin_type_index, notes, reject, reject_reason, keep_bulk, selected_index, focus, editing_index)
         key = read_key()
 
@@ -4494,7 +4556,8 @@ def sorting_loop(session):
                 edit_session_notes(session)
                 focus = "year"
             elif focus == "next_roll":
-                advance_manual_roll(session)
+                if session.get("session_type") == "Coin roll hunt" and session.get("roll_mode") == "manual":
+                    advance_manual_roll(session)
                 focus = "year"
             elif focus == "statistics":
                 statistics_menu(session)
