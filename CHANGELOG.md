@@ -5,8 +5,12 @@ A list of ongoing changes per version release.
 - *NEW* - Added numista API support for searching numista number which will then populate `Coin_Types.csv`
 - *NEW* - API Max quota usage. `Settings>Numista API Settings>Set monthly API Call Max`
 - *NEW* - Users can now see API stats such as `API calls used`, `remaining api calls`, `success/failed calls` and `lifetime API calls` (Note: Calls made outside of this software will not count. )
-- *Modified* - Users can now change country/denomination through a single session, if type you found in unowned, it prompts you to enter a numista number which will use the API to gather the `Country`, `Denomination`, and `year range` for that coin.
-- *Fixed* - On the coin sort screen, when tabbing down in bulk sorting mode, you could selet an invisible "Next Roll" option used for CRH. You can no longer select this invisible option in standard bulk mode.
+- *MODIFIED* - Users can now change country/denomination through a single session, if type you found in unowned, it prompts you to enter a numista number which will use the API to gather the `Country`, `Denomination`, and `year range` for that coin.
+- *MODIFIED* - Mint list selection now defaults to `No Mint`. 
+- *MODIFIED* - Coin type selection is now a list depending on total types: 1 type + other shows one line. 5 types + other shows all 5 options, 6 types + other gives you a rollling 7 line window. around the selected type.
+- *MODIFIED* - Typing a number on the numpad jumps you back to year input just like pressing + or - jumps you to mint.
+- *FIXED* - On the coin sort screen, when tabbing down in bulk sorting mode, you could selet an invisible "Next Roll" option used for CRH. You can no longer select this invisible option in standard bulk mode.
+- *FIXED* - Numista numbers were not always clickable in type selection. These should now all be clickable to open in your default browser when clicked.
 
 ## V0.1.2
 - Removed `Collection Sorting` and `Collection Audit` session types.

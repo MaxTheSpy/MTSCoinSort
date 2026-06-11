@@ -32,7 +32,7 @@ try:
 except ImportError:
     msvcrt = None
 
-MINTS = ["P", "D", "S", "W", "No Mint"]
+MINTS = ["No Mint", "P", "D", "S", "W"]
 SESSION_TYPES = ["Bulk sorting", "Coin roll hunt", "Other"]
 
 APP_NAME = "MTS CoinSort"
@@ -2693,6 +2693,88 @@ def type_option_label(option):
         parts.append("(" + " | ".join(details) + ")")
     return " ".join(parts)
 
+
+def visible_type_option_indexes(type_options, selected_index, window_size=7):
+    """Return indexes to display for the inline coin-type picker.
+
+    Display rules:
+      - 1 detected type + OTHER: keep the compact single-line field.
+      - Up to 5 detected types + OTHER: show the whole list.
+      - More than 5 detected types + OTHER: show a rolling window around
+        the selected type so the screen stays compact.
+    """
+    total = len(type_options or [])
+    if total <= 2:
+        return []
+
+    selected_index = max(0, min(int(selected_index or 0), total - 1))
+
+    if total <= 6:
+        return list(range(total))
+
+    window_size = max(3, min(int(window_size or 7), total))
+    half = window_size // 2
+    start = selected_index - half
+    start = max(0, min(start, total - window_size))
+    return list(range(start, start + window_size))
+
+
+def type_option_plain_label(option):
+    """Plain label for the live sorter screen.
+
+    The sorting screen needs to stay compact and predictable. Long Numista
+    titles are truncated by type_option_compact_label(), and only the small N#
+    token is optionally made clickable so full labels do not wrap/underline the
+    whole terminal line.
+    """
+    coin_type = str(option.get("coin_type", "") or "Unknown type").strip()
+    clean_number = clean_numista_number(option.get("numista_number", ""))
+
+    if coin_type.upper() == "OTHER":
+        return "OTHER"
+    if clean_number:
+        return f"{coin_type}  N# {clean_number}"
+    return coin_type
+
+
+def clickable_numista_number(clean_number):
+    """Return a compact clickable N# when the terminal supports OSC-8 links."""
+    clean_number = clean_numista_number(clean_number)
+    if not clean_number:
+        return ""
+    label = f"N# {clean_number}"
+    if ANSI_SUPPORTED:
+        return terminal_link(label, numista_url(clean_number))
+    return label
+
+
+def type_option_compact_label(option, reserved_columns=10, clickable_n_number=False):
+    """Short, fixed-width-safe label for the visible inline picker.
+
+    When clickable_n_number is True, only the N# token is hyperlinked. The coin
+    type text itself stays plain and truncated, which keeps VS Code/Windows
+    terminals from underlining or wrapping the whole sorter line.
+    """
+    coin_type = str(option.get("coin_type", "") or "Unknown type").strip()
+    clean_number = clean_numista_number(option.get("numista_number", ""))
+    width = shutil.get_terminal_size((100, 30)).columns
+
+    # Keep the list well inside the terminal so it does not wrap into the next
+    # field. Cap the label even on wide terminals so the sorter stays readable.
+    max_len = max(28, min(70, width - int(reserved_columns or 10)))
+
+    if coin_type.upper() == "OTHER":
+        return "OTHER"
+
+    if clean_number:
+        suffix_plain = f"  N# {clean_number}"
+        coin_max = max(12, max_len - len(suffix_plain))
+        coin_display = coin_type if len(coin_type) <= coin_max else coin_type[:coin_max - 3] + "..."
+        suffix = "  " + clickable_numista_number(clean_number) if clickable_n_number else suffix_plain
+        return coin_display + suffix
+
+    return coin_type if len(coin_type) <= max_len else coin_type[:max_len - 3] + "..."
+
 def selected_type_option(session, year, mint_index, coin_type_index):
     options = get_detected_type_options(session, year, MINTS[mint_index])
     if not options:
@@ -4264,7 +4346,7 @@ def draw(session, year, mint_index, coin_type_index, notes, reject, reject_reaso
         else:
             print(f"{bold('CRH Roll Tracking:')} {dim('off')}")
     print()
-    print(cyan("Flow:"), "Year → Mint → ENTER saves/adds coin  |  numpad . cycles Type  |  TAB moves selection")
+    print(cyan("Flow:"), "Type year digits anytime → + / - picks mint → ENTER saves  |  numpad . cycles visible Type list")
     print(cyan("Controls:"), f"TAB = move   ENTER = select/save   + / - = mint   {key_display(HOTKEYS['type_next'])} = type   {key_display(HOTKEYS['reject'])} = REJECT   {key_display(HOTKEYS['keep_bulk'])} = KEEP/BULK")
     print(dim(f"Year is checked live. Max allowed year: {current_year() + 1}."))    
     print(dim("TAB only changes which field/action is selected. It does not change mint or toggle anything."))
@@ -4288,7 +4370,7 @@ def draw(session, year, mint_index, coin_type_index, notes, reject, reject_reaso
     type_options = get_detected_type_options(session, year, MINTS[mint_index])
     if coin_type_index >= len(type_options):
         coin_type_index = 0
-    coin_type_value = bold(cyan(type_option_label(type_options[coin_type_index])))
+    coin_type_value = bold(cyan(type_option_compact_label(type_options[coin_type_index], reserved_columns=48)))
     if len(type_options) > 1:
         coin_type_value += dim(f"  [{coin_type_index + 1}/{len(type_options)}]")
     notes_value = bold(cyan(notes)) if notes else dim("(blank)")
@@ -4306,7 +4388,27 @@ def draw(session, year, mint_index, coin_type_index, notes, reject, reject_reaso
         print("  " + yellow(warning))
         print()
     box_line("Mint", mint_value, "mint", "+ / - changes mint; ENTER saves")
-    box_line("Type", coin_type_value, "coin_type", "numpad . changes type; Numista links are clickable in supported terminals")
+
+    visible_type_indexes = visible_type_option_indexes(type_options, coin_type_index)
+    if not visible_type_indexes:
+        box_line("Type", coin_type_value, "coin_type", "numpad . changes type")
+    else:
+        type_label = reverse(" Type ") if focus == "coin_type" else bold(" Type ")
+        print(f"{type_label:<38} {dim('numpad . cycles down; visible list prevents overshooting')}")
+        if BIG_UI:
+            print()
+        if len(type_options) > len(visible_type_indexes):
+            first_visible = visible_type_indexes[0] + 1
+            last_visible = visible_type_indexes[-1] + 1
+            print("  " + dim(f"Showing {first_visible}-{last_visible} of {len(type_options)} type choices."))
+        for option_index in visible_type_indexes:
+            option = type_options[option_index]
+            selected = option_index == coin_type_index
+            prefix = "> " if selected else "  "
+            line = f"  {prefix}{type_option_compact_label(option, reserved_columns=8, clickable_n_number=True)}"
+            print(reverse(line) if selected and focus == "coin_type" else (bold(cyan(line)) if selected else line))
+        if BIG_UI:
+            print()
     box_line("Save Coin", green("manual save if you tab here"), "save", "")
     box_line("Notes", notes_value, "notes", "required if Type is OTHER")
 
@@ -4347,11 +4449,11 @@ def draw(session, year, mint_index, coin_type_index, notes, reject, reject_reaso
     print(c("-" * 110, "94"))
     print(bold("Current selection help:"))
     if focus == "year":
-        print("Type the year. You can TAB to menus anytime, but the coin will not save unless the year is exactly 4 digits.")
+        print("Type the year. Number keys jump back here from most fields. The coin will not save unless the year is exactly 4 digits.")
     elif focus == "mint":
-        print("Use + or - to choose the mint. ENTER saves the coin. Use numpad . anytime to change Type.")
+        print("Use + or - to choose the mint. ENTER saves the coin. Type year digits anytime to jump back to Year.")
     elif focus == "coin_type":
-        print("Use numpad . to choose the detected Numista type. ENTER saves. Choose OTHER only when it is not listed; notes are required for OTHER.")
+        print("Use numpad . to move down the type list. ENTER saves. Choose OTHER only when it is not listed; notes are required for OTHER.")
     elif focus == "save":
         print("Press ENTER to save this coin and start the next coin. This is the manual save step if you tabbed past Mint.")
     elif focus == "notes":
@@ -4570,7 +4672,7 @@ def sorting_loop(session):
         coin = session["log"][index]
         year = coin.get("year", "")
         notes = coin.get("notes", "")
-        mint_value = coin.get("mint", "P")
+        mint_value = coin.get("mint", "No Mint")
         mint_index = MINTS.index(mint_value) if mint_value in MINTS else 0
         type_options = get_detected_type_options(session, year, mint_value)
         saved_type = coin.get("coin_type", "")
@@ -4736,13 +4838,14 @@ def sorting_loop(session):
                 notes = notes[:-1]
             continue
 
-        if focus == "year" and key.isdigit():
+        if isinstance(key, str) and len(key) == 1 and key.isdigit() and focus != "notes":
             if can_type_year_digit(session, year, key):
                 if len(year) >= 4:
                     year = key
                 else:
                     year += key
                 coin_type_index = 0
+                focus = "year"
             continue
 
         if focus == "notes" and isinstance(key, str) and len(key) == 1 and key.isprintable():
