@@ -1,6 +1,13 @@
 # Changelog
 A list of ongoing changes per version release. 
 
+## V0.2.0
+- *NEW* - Terminal/CMD will now play a sound when a coin has been saved as further confirmation.
+- *NEW* - Sound settings sub-menu. You can select default or provide the file path to your own custom sound.
+- *NEW* - Settings page now has an option to open the location of your data folder automatically. 
+- *MODIFIED* - Numista CSV is reloaded when starting a new session or resuming a session so that you do not have to exit and enter the app for the change to take effect.
+- *MODIFIED* - Hotkeys are now in their own settings submenu.
+
 ## V0.1.3
 - *NEW* - Added numista API support for searching numista number which will then populate `Coin_Types.csv`
 - *NEW* - API Max quota usage. `Settings>Numista API Settings>Set monthly API Call Max`

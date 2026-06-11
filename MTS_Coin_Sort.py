@@ -1,6 +1,4 @@
-# MTS CoinSort V0.1.3
-# no external dependencies required
-# Uses msvcrt on Windows and termios/tty on Linux/macOS
+# MTS CoinSort V0.2.0
 
 import csv
 import json
@@ -9,6 +7,7 @@ import re
 import sys
 import select
 import shutil
+import subprocess
 import builtins
 import io
 import ctypes
@@ -151,6 +150,9 @@ CRH_MANUAL_EXTRA_FOCUS = ["next_roll"]
 # available, the app falls back to plain text plus cls-based screen clears.
 USE_COLOR = True
 BIG_UI = True
+COIN_SAVE_SOUND = True
+COIN_SAVE_SOUND_MODE = "default"
+COIN_SAVE_SOUND_FILE = ""
 ROLL_QUANTITIES = {}
 CUSTOM_DENOMINATIONS = []
 NUMISTA_CLIENT_ID = ""
@@ -291,6 +293,272 @@ def clear():
     global _SCREEN_BUFFER
     _SCREEN_BUFFER = io.StringIO()
 
+def sound_mode_label():
+    if not COIN_SAVE_SOUND or COIN_SAVE_SOUND_MODE == "off":
+        return "OFF"
+    if COIN_SAVE_SOUND_MODE == "custom":
+        return "CUSTOM"
+    return "DEFAULT"
+
+def play_default_coin_saved_sound():
+    """Play the built-in coin-saved confirmation sound."""
+    try:
+        if os.name == "nt":
+            import winsound
+            winsound.Beep(880, 60)
+        elif sys.stdout is not None:
+            sys.stdout.write("\a")
+            sys.stdout.flush()
+    except Exception:
+        pass
+
+def play_custom_sound_file(path):
+    """Best-effort custom sound playback without extra Python dependencies.
+
+    Windows supports WAV files through winsound. macOS uses afplay when
+    available. Linux tries common desktop/audio players. If none work, the
+    function returns False so callers can fall back to the default beep.
+    """
+    path = clean_user_path(path) if path else ""
+    if not path or not os.path.exists(path):
+        return False
+
+    try:
+        if os.name == "nt":
+            import winsound
+            winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            return True
+
+        if sys.platform == "darwin":
+            subprocess.Popen(["afplay", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+
+        for player in ("paplay", "aplay", "ffplay"):
+            if shutil.which(player):
+                if player == "ffplay":
+                    subprocess.Popen([player, "-nodisp", "-autoexit", "-loglevel", "quiet", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                else:
+                    subprocess.Popen([player, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return True
+    except Exception:
+        return False
+
+    return False
+
+def play_coin_saved_sound(force=False):
+    """Play the configured confirmation sound after a coin is saved.
+
+    Default mode requires no sound files. Custom mode lets the user provide a
+    local file path, usually a WAV file on Windows. Linux/macOS support depends
+    on the system having a common command-line audio player installed.
+    """
+    if not force and (not COIN_SAVE_SOUND or COIN_SAVE_SOUND_MODE == "off"):
+        return
+
+    mode = COIN_SAVE_SOUND_MODE if COIN_SAVE_SOUND_MODE in ("default", "custom", "off") else "default"
+    if mode == "custom" and play_custom_sound_file(COIN_SAVE_SOUND_FILE):
+        return
+
+    play_default_coin_saved_sound()
+
+def open_folder(path):
+    """Open a folder in the OS file manager."""
+    try:
+        folder = clean_user_path(path)
+        os.makedirs(folder, exist_ok=True)
+        if os.name == "nt":
+            os.startfile(folder)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", folder], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            opener = shutil.which("xdg-open")
+            if opener:
+                subprocess.Popen([opener, folder], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                return False
+        return True
+    except Exception:
+        return False
+
+def open_sound_folder():
+    """Open the folder containing the custom sound file, if one is set."""
+    sound_file = str(COIN_SAVE_SOUND_FILE or "").strip()
+    if not sound_file:
+        clear()
+        print(yellow("No custom sound file is set."))
+        print()
+        print("Set one in Settings > Sound settings > Set custom sound file path.")
+        print()
+        print("Press any key to continue.")
+        read_key()
+        return False
+
+    folder = os.path.dirname(clean_user_path(sound_file)) or DATA_DIR
+    ok = open_folder(folder)
+    if not ok:
+        clear()
+        print(red("Could not open the custom sound file folder automatically."))
+        print()
+        print(folder)
+        print()
+        print("Press any key to continue.")
+        read_key()
+    return ok
+
+def open_app_folders_menu():
+    """Settings sub-page for opening data/config folders."""
+    index = 0
+    menu_items = [
+        "Open data folder",
+        "Open settings folder",
+        "Open Numista CSV folder",
+        "Open sessions folder",
+        "Open exports folder",
+        "Back",
+    ]
+
+    paths = {
+        "Open data folder": DATA_DIR,
+        "Open settings folder": CONFIG_DIR,
+        "Open Numista CSV folder": NUMISTA_DIR,
+        "Open sessions folder": SESSIONS_DIR,
+        "Open exports folder": EXPORTS_DIR,
+    }
+
+    while True:
+        clear()
+        print(c("=" * 100, "94"))
+        print(bold(cyan("APP FOLDERS".center(100))))
+        print(c("=" * 100, "94"))
+        print()
+        print(dim("Use these to copy in Numista CSV files, move session files, or find settings.json."))
+        print()
+        print(f"Data folder    : {cyan(DATA_DIR)}")
+        print(f"Settings folder: {cyan(CONFIG_DIR)}")
+        print(f"Settings file  : {cyan(SETTINGS_PATH)}")
+        print()
+
+        for i, item in enumerate(menu_items):
+            print(reverse(item) if i == index else item)
+
+        print()
+        print(dim("TAB/DOWN/+ next | UP/- previous | ENTER open/select | BACKSPACE/ESC back"))
+
+        key = read_key()
+        if key in (KEY_BACKSPACE, KEY_ESC):
+            return
+        if key in (KEY_TAB, KEY_DOWN, "+", "="):
+            index = (index + 1) % len(menu_items)
+            continue
+        if key in (KEY_SHIFT_TAB, KEY_UP, "-", "_"):
+            index = (index - 1) % len(menu_items)
+            continue
+        if key != KEY_ENTER:
+            continue
+
+        selected = menu_items[index]
+        if selected == "Back":
+            return
+
+        ok = open_folder(paths.get(selected, DATA_DIR))
+        if not ok:
+            clear()
+            print(red("Could not open that folder automatically."))
+            print()
+            print(paths.get(selected, DATA_DIR))
+            print()
+            print("Press any key to continue.")
+            read_key()
+
+def sound_settings_menu():
+    """Settings sub-page for coin-saved sound behavior."""
+    global COIN_SAVE_SOUND, COIN_SAVE_SOUND_MODE, COIN_SAVE_SOUND_FILE
+    index = 0
+    menu_items = [
+        "Set sound mode",
+        "Set custom sound file path",
+        "Test coin saved sound",
+        "Clear custom sound file path",
+        "Back",
+    ]
+
+    while True:
+        clear()
+        print(c("=" * 100, "94"))
+        print(bold(cyan("SOUND SETTINGS".center(100))))
+        print(c("=" * 100, "94"))
+        print()
+        print(dim("Default sound uses no files. Custom file is best as .wav on Windows."))
+        print()
+        print(f"Coin saved sound : {cyan(sound_mode_label())}")
+        print(f"Custom file path : {cyan(COIN_SAVE_SOUND_FILE or '(not set)')}")
+        print()
+
+        for i, item in enumerate(menu_items):
+            print(reverse(item) if i == index else item)
+
+        print()
+        print(dim("TAB/DOWN/+ next | UP/- previous | ENTER select | BACKSPACE/ESC back"))
+
+        key = read_key()
+        if key in (KEY_BACKSPACE, KEY_ESC):
+            save_settings()
+            return
+        if key in (KEY_TAB, KEY_DOWN, "+", "="):
+            index = (index + 1) % len(menu_items)
+            continue
+        if key in (KEY_SHIFT_TAB, KEY_UP, "-", "_"):
+            index = (index - 1) % len(menu_items)
+            continue
+        if key != KEY_ENTER:
+            continue
+
+        selected = menu_items[index]
+        if selected == "Set sound mode":
+            current = sound_mode_label()
+            choice = choose_from_list(
+                "Coin saved sound mode",
+                ["Default built-in beep", "Custom sound file", "Off", "Cancel"],
+            )
+            if choice == "Default built-in beep":
+                COIN_SAVE_SOUND = True
+                COIN_SAVE_SOUND_MODE = "default"
+                save_settings()
+            elif choice == "Custom sound file":
+                COIN_SAVE_SOUND = True
+                COIN_SAVE_SOUND_MODE = "custom"
+                if not COIN_SAVE_SOUND_FILE:
+                    value = text_input("Enter full path to your custom sound file. WAV is recommended on Windows:")
+                    if value is not None:
+                        COIN_SAVE_SOUND_FILE = clean_user_path(value) if value.strip() else ""
+                save_settings()
+            elif choice == "Off":
+                COIN_SAVE_SOUND = False
+                COIN_SAVE_SOUND_MODE = "off"
+                save_settings()
+        elif selected == "Set custom sound file path":
+            value = text_input(
+                "Enter full path to your custom sound file. WAV is recommended on Windows.",
+                COIN_SAVE_SOUND_FILE,
+            )
+            if value is not None:
+                COIN_SAVE_SOUND_FILE = clean_user_path(value) if value.strip() else ""
+                if COIN_SAVE_SOUND_FILE:
+                    COIN_SAVE_SOUND = True
+                    COIN_SAVE_SOUND_MODE = "custom"
+                save_settings()
+        elif selected == "Test coin saved sound":
+            play_coin_saved_sound(force=True)
+        elif selected == "Clear custom sound file path":
+            COIN_SAVE_SOUND_FILE = ""
+            if COIN_SAVE_SOUND_MODE == "custom":
+                COIN_SAVE_SOUND_MODE = "default"
+                COIN_SAVE_SOUND = True
+            save_settings()
+        elif selected == "Back":
+            save_settings()
+            return
+
 def key_display(key):
     names = {
         KEY_ENTER: "ENTER",
@@ -332,7 +600,7 @@ def ensure_app_dirs():
     os.makedirs(EXPORTS_DIR, exist_ok=True)
 
 def load_settings():
-    global HOTKEYS, USE_COLOR, BIG_UI, ROLL_QUANTITIES, CUSTOM_DENOMINATIONS, NUMISTA_CLIENT_ID, NUMISTA_API_KEY, NUMISTA_API_USAGE
+    global HOTKEYS, USE_COLOR, BIG_UI, COIN_SAVE_SOUND, COIN_SAVE_SOUND_MODE, COIN_SAVE_SOUND_FILE, ROLL_QUANTITIES, CUSTOM_DENOMINATIONS, NUMISTA_CLIENT_ID, NUMISTA_API_KEY, NUMISTA_API_USAGE
     HOTKEYS = DEFAULT_HOTKEYS.copy()
     if not os.path.exists(SETTINGS_PATH):
         ensure_app_dirs()
@@ -352,6 +620,17 @@ def load_settings():
                 HOTKEYS[action] = saved_hotkeys[action]
         USE_COLOR = bool(data.get("use_color", USE_COLOR))
         BIG_UI = bool(data.get("big_ui", BIG_UI))
+        sound_settings = data.get("sound", {}) if isinstance(data.get("sound", {}), dict) else {}
+        saved_mode = str(sound_settings.get("coin_saved_mode", "") or data.get("coin_save_sound_mode", "") or "").strip().lower()
+        saved_file = str(sound_settings.get("coin_saved_file", "") or data.get("coin_save_sound_file", "") or "").strip()
+        old_enabled = bool(data.get("coin_save_sound", COIN_SAVE_SOUND))
+        if saved_mode in ("default", "custom", "off"):
+            COIN_SAVE_SOUND_MODE = saved_mode
+            COIN_SAVE_SOUND = saved_mode != "off"
+        else:
+            COIN_SAVE_SOUND = old_enabled
+            COIN_SAVE_SOUND_MODE = "default" if old_enabled else "off"
+        COIN_SAVE_SOUND_FILE = clean_user_path(saved_file) if saved_file else ""
         ROLL_QUANTITIES = normalize_roll_quantities(data.get("roll_quantities", {}))
         CUSTOM_DENOMINATIONS = normalize_custom_denominations(data.get("custom_denominations", []))
         numista_api = data.get("numista_api", {}) if isinstance(data.get("numista_api", {}), dict) else {}
@@ -361,6 +640,9 @@ def load_settings():
         ensure_app_dirs()
     except Exception:
         HOTKEYS = DEFAULT_HOTKEYS.copy()
+        COIN_SAVE_SOUND = True
+        COIN_SAVE_SOUND_MODE = "default"
+        COIN_SAVE_SOUND_FILE = ""
         ROLL_QUANTITIES = {}
         CUSTOM_DENOMINATIONS = []
         NUMISTA_CLIENT_ID = ""
@@ -375,6 +657,13 @@ def save_settings():
         "hotkeys": HOTKEYS,
         "use_color": USE_COLOR,
         "big_ui": BIG_UI,
+        "coin_save_sound": COIN_SAVE_SOUND,
+        "coin_save_sound_mode": COIN_SAVE_SOUND_MODE,
+        "coin_save_sound_file": COIN_SAVE_SOUND_FILE,
+        "sound": {
+            "coin_saved_mode": COIN_SAVE_SOUND_MODE,
+            "coin_saved_file": COIN_SAVE_SOUND_FILE,
+        },
         "roll_quantities": ROLL_QUANTITIES,
         "custom_denominations": CUSTOM_DENOMINATIONS,
         "numista_api": {
@@ -1526,36 +1815,32 @@ def read_assignable_key():
         # Keep arrows, Tab, Enter, and normal printable keys assignable.
         return key
 
-def settings_menu(numista_countries=None, denoms_by_country=None):
-    global USE_COLOR, BIG_UI
+def hotkeys_settings_menu():
+    """Settings sub-page for assigning sorting hotkeys."""
+    global HOTKEYS
     actions = list(DEFAULT_HOTKEYS.keys())
-    menu_items = [HOTKEY_LABELS[action] for action in actions] + ["Coin roll quantities", "Numista API settings", "Toggle colors", "Toggle big title", "Reset hotkeys to defaults", "Back"]
+    menu_items = actions + ["Reset hotkeys to defaults", "Back"]
     index = 0
 
     while True:
         clear()
         print(c("=" * 100, "94"))
-        print(bold(cyan("SETTINGS".center(100))))
+        print(bold(cyan("HOTKEY SETTINGS".center(100))))
         print(c("=" * 100, "94"))
         print()
-        print(bold("Select a hotkey option, press ENTER, then press the key you want to assign."))
-        print(dim(f"Settings file: {SETTINGS_PATH}"))
-        print(dim(f"Data folder  : {DATA_DIR}"))
-        print(dim("To move sessions/exports/Numista CSV, edit data_dir in settings.json, then restart."))
+        print(dim("Select a hotkey, press ENTER, then press the new key. BACKSPACE/ESC cancels."))
         print()
+        print(bold("Current hotkeys"))
+        print(c("-" * 100, "94"))
 
         for i, item in enumerate(menu_items):
-            if i < len(actions):
-                action = actions[i]
-                value = key_display(HOTKEYS[action])
-                line = f"{item:<28} {cyan(value)}"
-            elif item == "Toggle colors":
-                line = f"{item:<28} {'ON' if USE_COLOR else 'OFF'}"
-            elif item == "Toggle big title":
-                line = f"{item:<28} {'ON' if BIG_UI else 'OFF'}"
+            if item in actions:
+                label = HOTKEY_LABELS[item]
+                value = key_display(HOTKEYS[item])
+                line = f"{label:<32} {cyan(value)}"
             else:
                 line = item
-            print((reverse(line) if i == index else line))
+            print(reverse(line) if i == index else line)
 
         print()
         print(dim("TAB/DOWN/+ next | UP/- previous | ENTER select | BACKSPACE/ESC back"))
@@ -1574,8 +1859,8 @@ def settings_menu(numista_countries=None, denoms_by_country=None):
             continue
 
         selected = menu_items[index]
-        if index < len(actions):
-            action = actions[index]
+        if selected in actions:
+            action = selected
             while True:
                 clear()
                 print(c("=" * 90, "94"))
@@ -1607,18 +1892,112 @@ def settings_menu(numista_countries=None, denoms_by_country=None):
                     read_key()
                 save_settings()
                 break
-        elif selected == "Coin roll quantities":
+        elif selected == "Reset hotkeys to defaults":
+            reset_hotkeys_to_default()
+        elif selected == "Back":
+            save_settings()
+            return
+
+
+def settings_menu(numista_countries=None, denoms_by_country=None):
+    global USE_COLOR, BIG_UI
+    menu_items = [
+        "Hotkeys >",
+        "Sound settings >",
+        "Coin roll quantities >",
+        "Numista API settings >",
+        "Open data folder",
+        "Open sound file folder",
+        "Open app folders >",
+        "Toggle colors",
+        "Toggle big title",
+        "Back",
+    ]
+    index = 0
+
+    def status_for_item(item):
+        if item == "Hotkeys >":
+            return f"{len(DEFAULT_HOTKEYS)} assigned"
+        if item == "Sound settings >":
+            return sound_mode_label()
+        if item == "Coin roll quantities >":
+            return f"{len(ROLL_QUANTITIES)} saved"
+        if item == "Numista API settings >":
+            return "set" if numista_api_configured() else "not set"
+        if item == "Open data folder":
+            return DATA_DIR
+        if item == "Open sound file folder":
+            return os.path.dirname(COIN_SAVE_SOUND_FILE) if COIN_SAVE_SOUND_FILE else "no custom sound set"
+        if item == "Open app folders >":
+            return "data / settings / CSV / sessions / exports"
+        if item == "Toggle colors":
+            return "ON" if USE_COLOR else "OFF"
+        if item == "Toggle big title":
+            return "ON" if BIG_UI else "OFF"
+        return ""
+
+    while True:
+        clear()
+        print(c("=" * 100, "94"))
+        print(bold(cyan("SETTINGS".center(100))))
+        print(c("=" * 100, "94"))
+        print()
+        print(dim(f"Settings file: {SETTINGS_PATH}"))
+        print(dim(f"Data folder  : {DATA_DIR}"))
+        print(dim("Items ending with > open a submenu. ENTER opens/toggles the selected item."))
+        print()
+        print(bold("Configuration"))
+        print(c("-" * 100, "94"))
+
+        for i, item in enumerate(menu_items):
+            if item == "Back" and i != 0:
+                print()
+            status = status_for_item(item)
+            if item.endswith(">"):
+                line = f"{item:<30} {cyan(status)}"
+            elif status:
+                line = f"{item:<30} {status}"
+            else:
+                line = item
+            print(reverse(line) if i == index else line)
+
+        print()
+        print(dim("TAB/DOWN/+ next | UP/- previous | ENTER select | BACKSPACE/ESC back"))
+
+        key = read_key()
+        if key in (KEY_ESC, KEY_BACKSPACE):
+            save_settings()
+            return
+        if key in (KEY_TAB, KEY_DOWN, "+", "="):
+            index = (index + 1) % len(menu_items)
+            continue
+        if key in (KEY_SHIFT_TAB, KEY_UP, "-", "_"):
+            index = (index - 1) % len(menu_items)
+            continue
+        if key != KEY_ENTER:
+            continue
+
+        selected = menu_items[index]
+        if selected == "Hotkeys >":
+            hotkeys_settings_menu()
+        elif selected == "Coin roll quantities >":
             coin_roll_quantities_menu(numista_countries, denoms_by_country)
-        elif selected == "Numista API settings":
+        elif selected == "Numista API settings >":
             numista_api_settings_menu()
+        elif selected == "Sound settings >":
+            sound_settings_menu()
+        elif selected == "Open data folder":
+            open_folder(DATA_DIR)
+        elif selected == "Open sound file folder":
+            open_sound_folder()
+        elif selected == "Open app folders >":
+            open_app_folders_menu()
         elif selected == "Toggle colors":
             USE_COLOR = not USE_COLOR
             save_settings()
         elif selected == "Toggle big title":
             BIG_UI = not BIG_UI
             save_settings()
-        elif selected == "Reset hotkeys to defaults":
-            reset_hotkeys_to_default()
         elif selected == "Back":
             save_settings()
             return
@@ -3903,6 +4282,29 @@ def resume_session(numista_countries, denoms_by_country):
 
     return {"session_name": session_name, "session_type": session_type, "country": country, "denomination": denomination, "currency": currency, "face_value": face_value, "path": path, "log": log, "session_notes": meta.get("session_notes", ""), "roll_mode": roll_mode, "roll_quantity": roll_quantity, "current_roll": current_roll, "current_roll_count": current_roll_count}
 
+def refresh_numista_index_for_session(numista_index=None, numista_files=None):
+    """Reload Numista CSV/cache before starting or resuming a session.
+
+    This lets users copy a fresh Numista collection export into the Numista CSV
+    folder and start/resume sorting without quitting and restarting the app.
+    """
+    old_file_count = len(numista_files or [])
+    old_coin_count = len(numista_index or set())
+    loaded = load_numista_index()
+    new_index, new_files, new_countries, new_denoms, new_type_index = loaded
+
+    if numista_files is not None and (len(new_files) != old_file_count or len(new_index) != old_coin_count):
+        clear()
+        print(green("Numista collection data refreshed."))
+        print()
+        print(f"CSV files : {old_file_count} -> {len(new_files)}")
+        print(f"Owned rows: {old_coin_count} -> {len(new_index)}")
+        print()
+        print("Press any key to continue.")
+        read_key()
+
+    return loaded
+
 def session_menu():
     ensure_sessions_dir()
     ensure_numista_dir()
@@ -3910,6 +4312,7 @@ def session_menu():
     while True:
         choice = choose_from_list("Coin Sorter Sessions", ["Start new session", "Resume session", "Statistics", "Export Data", "Settings", "Quit"])
         if choice == "Start new session":
+            numista_index, numista_files, numista_countries, denoms_by_country, numista_type_index = refresh_numista_index_for_session(numista_index, numista_files)
             session = new_session(numista_countries, denoms_by_country)
             if session:
                 session["numista_index"] = numista_index
@@ -3920,6 +4323,7 @@ def session_menu():
                 session["numista_type_index"] = numista_type_index
                 return session
         elif choice == "Resume session":
+            numista_index, numista_files, numista_countries, denoms_by_country, numista_type_index = refresh_numista_index_for_session(numista_index, numista_files)
             session = resume_session(numista_countries, denoms_by_country)
             if session:
                 session["numista_index"] = numista_index
@@ -3935,6 +4339,7 @@ def session_menu():
             export_menu()
         elif choice == "Settings":
             settings_menu(numista_countries, denoms_by_country)
+            numista_index, numista_files, numista_countries, denoms_by_country, numista_type_index = refresh_numista_index_for_session(numista_index, numista_files)
         elif choice == "Quit" or choice is None:
             return None
 
@@ -4347,7 +4752,7 @@ def draw(session, year, mint_index, coin_type_index, notes, reject, reject_reaso
             print(f"{bold('CRH Roll Tracking:')} {dim('off')}")
     print()
     print(cyan("Flow:"), "Type year digits anytime → + / - picks mint → ENTER saves  |  numpad . cycles visible Type list")
-    print(cyan("Controls:"), f"TAB = move   ENTER = select/save   + / - = mint   {key_display(HOTKEYS['type_next'])} = type   {key_display(HOTKEYS['reject'])} = REJECT   {key_display(HOTKEYS['keep_bulk'])} = KEEP/BULK")
+    print(cyan("Controls:"), f"TAB = move   ENTER = select/save   + / - = mint   {key_display(HOTKEYS['type_next'])} = type   {key_display(HOTKEYS['reject'])} = REJECT   {key_display(HOTKEYS['keep_bulk'])} = KEEP/BULK   Sound: {sound_mode_label()}")
     print(dim(f"Year is checked live. Max allowed year: {current_year() + 1}."))    
     print(dim("TAB only changes which field/action is selected. It does not change mint or toggle anything."))
     print(c("-" * 110, "94"))
@@ -4695,6 +5100,7 @@ def sorting_loop(session):
         should_return_to_recent = return_to_recent_after_edit and was_editing_index is not None
         saved, editing_index = save_current_coin(session, year, mint_index, coin_type_index, notes, reject, reject_reason, keep_bulk, editing_index, numista_index)
         if saved:
+            play_coin_saved_sound()
             year, mint_index, coin_type_index, notes, reject, reject_reason, keep_bulk, focus = reset_coin()
             if should_return_to_recent:
                 selected_index = max(0, min(was_editing_index, len(session["log"]) - 1)) if session["log"] else -1
